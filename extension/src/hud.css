@@ -1,0 +1,200 @@
+/* hud.css — SalesCoach AI Floating HUD Card
+ * Served via web_accessible_resources + chrome.runtime.getURL().
+ * Also inlined as fallback in hud.ts → getInlineCSS().
+ */
+
+#salescoach-hud {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 360px;
+  max-width: min(90vw, 360px);
+  background: rgba(13, 13, 28, 0.92);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  border-radius: 14px;
+  padding: 14px 16px 10px;
+  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  color: #e2e8f0;
+  z-index: 2147483647;
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(139, 92, 246, 0.1);
+
+  /* Entry animation */
+  transform: translateY(16px) scale(0.97);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 150ms ease;
+}
+
+#salescoach-hud.sc-visible {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+  pointer-events: all;
+}
+
+/* ── Header ── */
+.sc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  gap: 8px;
+}
+
+.sc-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ── Objection Type Badge ── */
+.sc-objection-badge {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  padding: 3px 9px;
+  border-radius: 100px;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+  white-space: nowrap;
+}
+
+/* Per-type accent colors */
+.sc-badge-price     { color: #f87171; background: rgba(248,113,113,0.1); border-color: rgba(248,113,113,0.25); }
+.sc-badge-timing    { color: #fb923c; background: rgba(251,146,60,0.1);  border-color: rgba(251,146,60,0.25);  }
+.sc-badge-authority { color: #fbbf24; background: rgba(251,191,36,0.1);  border-color: rgba(251,191,36,0.25);  }
+.sc-badge-competitor{ color: #34d399; background: rgba(52,211,153,0.1);  border-color: rgba(52,211,153,0.25);  }
+.sc-badge-no_need   { color: #60a5fa; background: rgba(96,165,250,0.1);  border-color: rgba(96,165,250,0.25);  }
+.sc-badge-trust     { color: #a78bfa; background: rgba(167,139,250,0.1); border-color: rgba(167,139,250,0.25); }
+.sc-badge-roi       { color: #f472b6; background: rgba(244,114,182,0.1); border-color: rgba(244,114,182,0.25); }
+.sc-badge-complexity{ color: #38bdf8; background: rgba(56,189,248,0.1);  border-color: rgba(56,189,248,0.25);  }
+.sc-badge-priority  { color: #a3e635; background: rgba(163,230,53,0.1);  border-color: rgba(163,230,53,0.25);  }
+.sc-badge-ghost     { color: #94a3b8; background: rgba(148,163,184,0.1); border-color: rgba(148,163,184,0.25); }
+
+/* ── Confidence ── */
+.sc-confidence {
+  font-size: 11px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* ── Close Button ── */
+.sc-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: none;
+  border: none;
+  color: #475569;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: color 150ms ease, background 150ms ease;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.sc-close:hover {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sc-close:focus-visible {
+  outline: 2px solid #a78bfa;
+  outline-offset: 2px;
+}
+
+/* ── Response Text ── */
+.sc-response {
+  line-height: 1.65;
+  color: #cbd5e1;
+  min-height: 24px;
+  word-break: break-word;
+}
+
+/* Blinking cursor during streaming */
+.sc-response.sc-streaming::after {
+  content: '▋';
+  color: #a78bfa;
+  animation: sc-blink 0.9s step-end infinite;
+  margin-left: 1px;
+}
+
+@keyframes sc-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* ── Progress Bar ── */
+.sc-progress {
+  margin-top: 10px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.sc-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #7c3aed, #a78bfa);
+  border-radius: 2px;
+  width: 100%;
+}
+
+/* ── Notice Banner ── */
+.sc-notice {
+  font-size: 12px;
+  color: #f59e0b;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── Light Mode Support ── */
+@media (prefers-color-scheme: light) {
+  #salescoach-hud {
+    background: rgba(255, 255, 255, 0.96);
+    color: #1e293b;
+    border-color: rgba(139, 92, 246, 0.3);
+    box-shadow:
+      0 8px 32px rgba(0, 0, 0, 0.15),
+      0 0 0 1px rgba(139, 92, 246, 0.1);
+  }
+
+  .sc-response { color: #334155; }
+
+  .sc-close {
+    color: #94a3b8;
+  }
+
+  .sc-close:hover {
+    background: rgba(0, 0, 0, 0.06);
+    color: #1e293b;
+  }
+
+  .sc-progress {
+    background: rgba(0, 0, 0, 0.06);
+  }
+}
+
+/* ── Reduced Motion ── */
+@media (prefers-reduced-motion: reduce) {
+  #salescoach-hud {
+    transition: none;
+    transform: none;
+  }
+
+  .sc-response.sc-streaming::after {
+    animation: none;
+  }
+}

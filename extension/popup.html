@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pitchly</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <div class="header">
+      <div class="logo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z" fill="#a78bfa"/>
+        </svg>
+        <span class="logo-text">Pitchly</span>
+      </div>
+      <span id="status-badge" class="status-badge status-idle" aria-live="polite">Idle</span>
+    </div>
+
+    <!-- Main Action -->
+    <button id="start-stop-btn" class="start-stop-btn" aria-label="Start listening on this call">
+      ▶ Start Listening
+    </button>
+
+    <!-- Audio Mode -->
+    <div class="mode-row" aria-live="polite">
+      <span class="mode-label">Mode</span>
+      <span id="audio-mode-badge" class="mode-badge" style="display:none;" aria-label="Current audio capture mode"></span>
+    </div>
+
+    <!-- Worker Host Config -->
+    <div class="config-section">
+      <label for="worker-host" class="config-label">Worker URL</label>
+      <input
+        id="worker-host"
+        type="text"
+        class="config-input"
+        placeholder="your-worker.workers.dev"
+        spellcheck="false"
+        autocomplete="off"
+      />
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      <span>Objection card appears within 3s</span>
+    </div>
+  </div>
+  <script src="dist/popup.js" type="module"></script>
+</body>
+</html>

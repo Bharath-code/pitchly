@@ -1,0 +1,15 @@
+{
+  "name": "pitchly",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "extension",
+    "worker"
+  ],
+  "scripts": {
+    "build:ext": "cd extension && node build.mjs",
+    "dev:worker": "cd worker && npx wrangler dev",
+    "deploy:worker": "cd worker && npx wrangler deploy",
+    "build": "npm run build:ext"
+  }
+}

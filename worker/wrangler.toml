@@ -1,0 +1,33 @@
+name = "pitchly-worker"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── Workers AI binding ──────────────────────────────────────────────────────
+[[ai]]
+binding = "AI"
+
+# ── Durable Objects ─────────────────────────────────────────────────────────
+[durable_objects]
+bindings = [
+  { name = "CallSessionAgent", class_name = "CallSessionAgent" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["CallSessionAgent"]
+
+# ── Variables ────────────────────────────────────────────────────────────────
+[vars]
+# Default model — swap to any @ai-sdk/* provider via one env var change
+AI_MODEL = "gemini-2.5-flash"
+# AI_MODEL = "gemini-3-flash-preview"          # bleeding edge — opt-in
+# AI_MODEL = "claude-haiku-4-20250514"         # switch when first revenue arrives
+
+# ── Secrets — set via CLI (never commit to git) ─────────────────────────────
+# wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY
+# wrangler secret put ANTHROPIC_API_KEY   (when switching to Claude)
+
+# ── Local dev overrides ──────────────────────────────────────────────────────
+# Create worker/.dev.vars (gitignored) with:
+# GOOGLE_GENERATIVE_AI_API_KEY=AIza...
