@@ -15,7 +15,7 @@
     "https://*.zoom.us/*"
   ],
   "background": {
-    "service_worker": "dist/background.js",
+    "service_worker": "background.js",
     "type": "module"
   },
   "content_scripts": [
@@ -24,7 +24,7 @@
         "https://meet.google.com/*",
         "https://*.zoom.us/*"
       ],
-      "js": ["dist/content.js"],
+      "js": ["content.js"],
       "run_at": "document_idle"
     }
   ],
@@ -39,7 +39,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["dist/hud.css", "dist/audio-processor.js"],
+      "resources": ["hud.css", "audio-processor.js"],
       "matches": [
         "https://meet.google.com/*",
         "https://*.zoom.us/*"

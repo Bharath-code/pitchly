@@ -52,11 +52,25 @@ async function build() {
     }),
   ])
 
-  // Copy HUD CSS to dist (it's already in the right format — no processing needed)
-  try {
-    copyFileSync('src/hud.css', 'dist/hud.css')
-  } catch {
-    // hud.css is optional — styles are also inlined in hud.ts as fallback
+  // Copy static assets to dist/
+  const staticAssets = [
+    { from: 'manifest.json', to: 'dist/manifest.json' },
+    { from: 'popup.html', to: 'dist/popup.html' },
+    { from: 'popup.css', to: 'dist/popup.css' },
+    { from: 'src/hud.css', to: 'dist/hud.css' },
+    { from: 'icons/icon16.png', to: 'dist/icons/icon16.png' },
+    { from: 'icons/icon48.png', to: 'dist/icons/icon48.png' },
+    { from: 'icons/icon128.png', to: 'dist/icons/icon128.png' },
+  ]
+
+  mkdirSync('dist/icons', { recursive: true })
+
+  for (const asset of staticAssets) {
+    try {
+      copyFileSync(asset.from, asset.to)
+    } catch (err) {
+      console.warn(`⚠️  Failed to copy ${asset.from}: ${err.message}`)
+    }
   }
 
   console.log('✅ Extension build complete → dist/')
