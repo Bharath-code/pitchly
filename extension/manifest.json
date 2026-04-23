@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "116",
   "name": "Pitchly",
   "version": "0.1.0",
   "description": "Real-time objection handling for sales calls. Detects objections and streams response suggestions instantly.",

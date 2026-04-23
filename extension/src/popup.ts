@@ -6,8 +6,15 @@ import type { CaptureMode, ExtMessage } from './types'
 const WORKER_HOST_KEY = 'workerHost'
 const DEFAULT_HOST = 'pitchly-worker.YOURNAME.workers.dev'
 
+// ─── Icons ───────────────────────────────────────────────────────────────────
+const ICON_PLAY = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`
+const ICON_STOP = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>`
+const ICON_SPINNER = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="animation: spin 1s linear infinite"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`
+
 // ─── DOM Refs ────────────────────────────────────────────────────────────────
 const startStopBtn = document.getElementById('start-stop-btn') as HTMLButtonElement
+const btnText = document.getElementById('btn-text') as HTMLSpanElement
+const btnIcon = document.getElementById('btn-icon') as HTMLSpanElement
 const statusBadge = document.getElementById('status-badge') as HTMLSpanElement
 const audioModeBadge = document.getElementById('audio-mode-badge') as HTMLSpanElement
 const workerHostInput = document.getElementById('worker-host') as HTMLInputElement
@@ -26,11 +33,13 @@ async function loadState(): Promise<void> {
 // ─── Render ───────────────────────────────────────────────────────────────────
 function renderState(listening: boolean, mode?: CaptureMode): void {
   if (listening) {
-    startStopBtn.textContent = '⏹ Stop Listening'
+    btnText.textContent = 'Stop Listening'
+    btnIcon.innerHTML = ICON_STOP
     startStopBtn.classList.add('active')
     setStatus('Listening', 'listening')
   } else {
-    startStopBtn.textContent = '▶ Start Listening'
+    btnText.textContent = 'Start Listening'
+    btnIcon.innerHTML = ICON_PLAY
     startStopBtn.classList.remove('active')
     setStatus('Idle', 'idle')
   }
@@ -51,9 +60,9 @@ function setStatus(text: string, state: 'idle' | 'listening' | 'connecting' | 'e
 
 function modeLabel(mode: CaptureMode): string {
   switch (mode) {
-    case 'mixed': return '🎧 Tab + Mic'
-    case 'tab': return '🖥 Tab Only'
-    case 'mic-only': return '🎤 Mic Only'
+    case 'mixed': return 'Tab + Mic'
+    case 'tab': return 'Tab Only'
+    case 'mic-only': return 'Mic Only'
   }
 }
 
@@ -65,12 +74,17 @@ startStopBtn.addEventListener('click', async () => {
   if (isListening) {
     // Stop
     setStatus('Stopping…', 'connecting')
+    btnIcon.innerHTML = ICON_SPINNER
+    startStopBtn.disabled = true
+
     await chrome.runtime.sendMessage({ type: 'STOP_SESSION' } satisfies ExtMessage)
     await chrome.storage.local.set({ isListening: false, audioMode: null })
     renderState(false)
+    startStopBtn.disabled = false
   } else {
     // Start
     setStatus('Connecting…', 'connecting')
+    btnIcon.innerHTML = ICON_SPINNER
     startStopBtn.disabled = true
 
     // Save worker host if changed
@@ -87,10 +101,14 @@ startStopBtn.addEventListener('click', async () => {
         renderState(true, response.mode)
       } else {
         setStatus('Error', 'error')
+        btnText.textContent = 'Start Listening'
+        btnIcon.innerHTML = ICON_PLAY
         console.error('[Pitchly] Start failed:', response.error)
       }
     } catch (err) {
       setStatus('Error', 'error')
+      btnText.textContent = 'Start Listening'
+      btnIcon.innerHTML = ICON_PLAY
       console.error('[Pitchly] Could not start session:', err)
     } finally {
       startStopBtn.disabled = false

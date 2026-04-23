@@ -52,7 +52,7 @@ cd extension && npm run build
 
 1. Open `chrome://extensions`
 2. Enable **Developer mode** (top right)
-3. Click **Load unpacked** → select the `extension/` folder
+3. Click **Load unpacked** → select the `extension/dist/` folder
 4. Pitchly icon appears in toolbar
 
 ### 5. Run worker locally

@@ -22,7 +22,7 @@ export interface ObjectionCard {
 
 // Messages between background ↔ content ↔ popup
 export type ExtMessage =
-  | { type: 'START_SESSION' }
+  | { type: 'START_SESSION'; tabStreamId?: string }
   | { type: 'STOP_SESSION' }
   | { type: 'GET_STATUS' }
   | { type: 'GET_STREAM' }

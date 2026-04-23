@@ -1,5 +1,5 @@
 // background.ts — MV3 Service Worker
-// Handles: three-tier audio capture, keepalive alarm, popup messaging
+// Handles: popup messaging, tab stream ID acquisition, keepalive alarm
 
 import type { CaptureMode, ExtMessage } from './types'
 
@@ -12,8 +12,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 })
 
 // ─── Session State ──────────────────────────────────────────────────────────
-let activeStream: MediaStream | null = null
-let audioContext: AudioContext | null = null
 let currentMode: CaptureMode | null = null
 
 // ─── Message Router ─────────────────────────────────────────────────────────
@@ -30,14 +28,26 @@ chrome.runtime.onMessage.addListener(
           return
         }
         const result = await startCapture(tab.id)
+        // Forward START_SESSION to content script so it opens the WebSocket
+        notifyContentScript(tab.id, {
+          type: 'START_SESSION',
+          tabStreamId: result.tabStreamId,
+        })
         sendResponse({ ok: true, mode: result.mode })
       } else if (message.type === 'STOP_SESSION') {
+        const [tab] = await chrome.tabs.query({
+          active: true,
+          currentWindow: true,
+        })
+        if (tab?.id) {
+          notifyContentScript(tab.id, { type: 'STOP_SESSION' })
+        }
         stopCapture()
         sendResponse({ ok: true })
       } else if (message.type === 'GET_STATUS') {
         sendResponse({
           ok: true,
-          listening: activeStream !== null,
+          listening: currentMode !== null,
           mode: currentMode,
         })
       }
@@ -46,73 +56,50 @@ chrome.runtime.onMessage.addListener(
   }
 )
 
-// ─── Audio Capture: Three-Tier Fallback ─────────────────────────────────────
+// ─── Audio Capture Setup: Get tab stream ID for content script ──────────────
 async function startCapture(
   tabId: number
-): Promise<{ mode: CaptureMode }> {
+): Promise<{ mode: CaptureMode; tabStreamId?: string }> {
   stopCapture() // clean up any previous session
 
-  // Tier 1: Tab audio + mic mixed (browser meetings — best quality)
+  // Try to get a tab stream ID so content script can capture meeting audio
   try {
-    const tabStream = await captureTab()
-    const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    activeStream = mixStreams(tabStream, micStream)
+    const tabStreamId = await getTabStreamId(tabId)
     currentMode = 'mixed'
-    console.log('[Pitchly] Audio mode: mixed (tab + mic)')
+    console.log('[Pitchly] Tab stream acquired — mixed mode')
     notifyContentScript(tabId, { type: 'AUDIO_MODE', mode: 'mixed' })
-    return { mode: 'mixed' }
+    return { mode: 'mixed', tabStreamId }
   } catch (_e) {
-    console.warn('[Pitchly] Tier 1 failed, trying tab-only...')
+    console.warn('[Pitchly] Tab capture unavailable, falling back to mic-only...')
   }
 
-  // Tier 2: Tab audio only (mic permission denied)
-  try {
-    activeStream = await captureTab()
-    currentMode = 'tab'
-    console.log('[Pitchly] Audio mode: tab only')
-    notifyContentScript(tabId, { type: 'AUDIO_MODE', mode: 'tab' })
-    return { mode: 'tab' }
-  } catch (_e) {
-    console.warn('[Pitchly] Tier 2 failed, falling back to mic-only...')
-  }
-
-  // Tier 3: Mic only (Zoom Desktop App / Teams Desktop)
-  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-  activeStream = micStream
+  // Fallback: mic only (Zoom Desktop App / no tab audio permission)
   currentMode = 'mic-only'
-  console.log('[Pitchly] Audio mode: mic-only (Zoom Desktop detected)')
+  console.log('[Pitchly] Audio mode: mic-only')
   notifyContentScript(tabId, { type: 'AUDIO_MODE', mode: 'mic-only' })
   return { mode: 'mic-only' }
 }
 
 function stopCapture(): void {
-  activeStream?.getTracks().forEach((t: MediaStreamTrack) => t.stop())
-  audioContext?.close()
-  activeStream = null
-  audioContext = null
   currentMode = null
 }
 
-// chrome.tabCapture.capture() automatically targets the current tab — no tabId needed
-function captureTab(): Promise<MediaStream> {
+// Get a stream ID the content script can use to capture tab audio
+function getTabStreamId(consumerTabId: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    chrome.tabCapture.capture(
-      { audio: true, video: false },
-      (stream) => {
-        if (stream) resolve(stream)
-        else reject(new Error(chrome.runtime.lastError?.message ?? 'tabCapture failed'))
+    chrome.tabCapture.getMediaStreamId(
+      { consumerTabId },
+      (streamId) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message))
+        } else if (!streamId) {
+          reject(new Error('No stream ID returned'))
+        } else {
+          resolve(streamId)
+        }
       }
     )
   })
-}
-
-function mixStreams(tab: MediaStream, mic: MediaStream): MediaStream {
-  const ctx = new AudioContext({ sampleRate: 16000 })
-  audioContext = ctx
-  const dest = ctx.createMediaStreamDestination()
-  ctx.createMediaStreamSource(tab).connect(dest)
-  ctx.createMediaStreamSource(mic).connect(dest)
-  return dest.stream
 }
 
 // ─── Notify the content script running in the active tab ───────────────────
@@ -121,5 +108,3 @@ function notifyContentScript(tabId: number, message: ExtMessage): void {
     // Content script may not be injected yet — safe to ignore
   })
 }
-
-
