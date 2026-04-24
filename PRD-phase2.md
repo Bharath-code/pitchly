@@ -1,8 +1,8 @@
 # Pitchly — Phase 2 PRD: "From Cue Card to Co-Pilot"
 
-**Status:** Approved  
+**Status:** Week 3 Complete ✅  
 **Target:** Individual sales reps + team managers (no auth)  
-**Timeline:** 4 weeks  
+**Timeline:** 4 weeks (Week 1-3 done, Week 4: final validation)  
 **Success Metric:** A rep finishes a call and receives an email snapshot they forward to their manager.
 
 ---
@@ -16,10 +16,10 @@ Reps forget 90% of what happens on a call. Objection cards help in the moment, b
 Real-time talk ratio + sentiment alerts during the call, followed by an auto-generated post-call snapshot emailed to the rep (and optionally their manager).
 
 ### 1.3 Non-Goals
-- No auth system (Clerk) — collect email via popup
-- No dashboard UI — build D1 schema only, dashboard comes Phase 3
-- No native CRM integrations — generic webhook only
-- No speaker diarization ML — use dual-stream volume heuristic instead
+- No auth system (Clerk) — collect email via popup ✅
+- No dashboard UI — build D1 schema only, dashboard comes Phase 3 ✅
+- No native CRM integrations — generic webhook only ✅
+- No speaker diarization ML — use dual-stream volume heuristic instead ✅
 
 ---
 
@@ -58,214 +58,46 @@ Real-time talk ratio + sentiment alerts during the call, followed by an auto-gen
                      └──────────────┘
 ```
 
-### 3.2 Dual-Stream Audio Refactor (P0)
+### 3.2 Dual-Stream Audio Refactor (P0) ✅
 
-**Current:** Mic + Tab mixed into mono → Worklet → single PCM stream  
-**New:** Two separate MediaStreamSources feeding the same AudioWorklet, but tagged:
-
-```typescript
-// audio-processor.ts
-interface AudioChunk {
-  source: 'mic' | 'tab';
-  samples: Float32Array;
-}
-```
-
-The Worklet accumulates 4096-sample chunks per source and posts them as `{ mic: Float32Array, tab: Float32Array }`.
-
-**Extension `content.ts` sends:**
-```json
-{
-  "type": "audio_chunk",
-  "mic": [0.0, 0.01, -0.02, ...],
-  "tab": [0.0, 0.0, 0.0, ...]
-}
-```
-
-**Worker receives and routes:**
-- `tab` stream → Deepgram Nova-3 (prospect voice only, cleaner STT)
-- `mic` stream → RMS volume tracking only (no STT needed for rep)
-- Both streams → Talk ratio calculation
-
-**Why this matters:**
-- Eliminates self-transcription (rep's voice not sent to Deepgram)
-- Accurate talk ratio from volume levels
-- Sets foundation for future true diarization
+**Implemented:** Tab audio sent to Deepgram for STT. Mic audio measured locally via RMS for talk ratio only. In mic-only fallback, mic goes to STT.
 
 ---
 
 ## 4. Feature Specifications
 
-### 4.1 Talk Ratio Meter (P1)
+### 4.1 Talk Ratio Meter (P1) ✅
 
-**Real-time HUD component:**
+- Every 5 seconds, calculates RMS energy for last 5s of mic vs tab
+- Nudges: >75% "Listen more!", <30% "Ask a discovery question"
+- Bar colors: Green (balanced), Yellow (>60%), Red (>75%)
 
-```
-[ 🎤 You: 58% ] [ 🗣️ Them: 42% ] ⚠️ Listen more!
-```
+### 4.2 Sentiment Thermometer (P2) ✅
 
-**Logic:**
-- Every 5 seconds, calculate RMS energy for last 5s of mic vs tab
-- If `mic_ratio > 65%` for >10s consecutive, show "⚠️ Listen more!" nudge
-- If `mic_ratio < 30%`, show "🎯 Ask a discovery question" nudge
+**Tier 1 — Real-time:** Keyword-based EMA with word-boundary regex and 10s decay. Thresholds: ≥0.3 strong, ≤-0.3 at_risk.
 
-**Worker Calculation:**
-```typescript
-function calculateTalkRatio(micChunks: Float32Array[], tabChunks: Float32Array[]): Ratio {
-  const micEnergy = rms(flatten(micChunks));
-  const tabEnergy = rms(flatten(tabChunks));
-  const total = micEnergy + tabEnergy;
-  return {
-    you: Math.round((micEnergy / total) * 100),
-    them: Math.round((tabEnergy / total) * 100)
-  };
-}
-```
+**Tier 2 — Post-call:** Full transcript sent to Gemini for phase-based sentiment arc analysis with evidence-based shift detection.
 
-**UI Spec:**
-- Thin progress bar at top of HUD
-- Color: Green (balanced), Yellow (you >60%), Red (you >75%)
-- Nudge text fades in/out, non-intrusive
+### 4.3 D1 Persistence Layer (P3) ✅
 
----
+**Database:** `pitchly-db` (APAC, ID: `7cdea935-99ac-4080-b3d2-5dfd119a6fb4`)
 
-### 4.2 Sentiment Thermometer (P2)
+**Schema applied:**
+- `calls` — id, session_name, rep_email, manager_email, started_at, ended_at, duration_ms, talk_ratio_you, talk_ratio_them, final_sentiment, summary, follow_up_draft
+- `transcript_segments` — call_id, speaker, text, sentiment, timestamp
+- `objections` — call_id, type, confidence, response, timestamp
 
-**Real-time HUD component:**
+All queries parameterized. All writes happen at call end only.
 
-```
-Sentiment: 🟢 Strong  |  🟡 Cooling  |  🔴 At Risk
-```
+### 4.4 Post-Call Snapshot Email (P4) ✅
 
-**Two-tier system:**
-
-**Tier 1 — Real-time (lightweight, rule-based):**
-- Scan last 3 utterances for keyword matches
-- "love", "perfect", "let's do it" → Green (+1)
-- "maybe", "not sure", "expensive", "complicated" → Yellow (0)
-- "no", "cancel", "not interested", "remove", "unsubscribe" → Red (-1)
-- Smooth with exponential moving average (EMA)
-
-**Tier 2 — Post-call (Gemini analysis):**
-- After call ends, send full transcript to Gemini
-- Prompt: `Analyze sentiment arc. Identify moments where sentiment shifted and why.`
-- Stored in D1 for snapshot email
-
-**Real-time UI:**
-- Small dot indicator next to talk ratio bar
-- On Red sentiment: HUD shows "⚠️ Sentiment dropped — acknowledge their concern"
-- Updates every 5 seconds
-
----
-
-### 4.3 D1 Persistence Layer (P3)
-
-**Database Schema:**
-
-```sql
--- Calls table
-CREATE TABLE calls (
-  id TEXT PRIMARY KEY,
-  session_name TEXT NOT NULL,
-  rep_email TEXT,
-  manager_email TEXT,
-  started_at INTEGER,
-  ended_at INTEGER,
-  talk_ratio_you INTEGER,
-  talk_ratio_them INTEGER,
-  final_sentiment TEXT,
-  summary TEXT,
-  follow_up_draft TEXT,
-  created_at INTEGER DEFAULT (unixepoch())
-);
-
--- Transcript segments
-CREATE TABLE transcript_segments (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  call_id TEXT,
-  speaker TEXT CHECK(speaker IN ('rep', 'prospect')),
-  text TEXT,
-  sentiment TEXT,
-  timestamp INTEGER,
-  FOREIGN KEY (call_id) REFERENCES calls(id)
-);
-
--- Objections
-CREATE TABLE objections (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  call_id TEXT,
-  type TEXT,
-  confidence REAL,
-  response TEXT,
-  handled_well BOOLEAN,
-  timestamp INTEGER,
-  FOREIGN KEY (call_id) REFERENCES calls(id)
-);
-```
-
-**Zod Types:**
-```typescript
-const CallSchema = z.object({
-  id: z.string(),
-  sessionName: z.string(),
-  repEmail: z.string().email().optional(),
-  managerEmail: z.string().email().optional(),
-  startedAt: z.number(),
-  endedAt: z.number().optional(),
-  talkRatioYou: z.number().int().min(0).max(100).optional(),
-  talkRatioThem: z.number().int().min(0).max(100).optional(),
-  finalSentiment: z.enum(['strong', 'neutral', 'at_risk']).optional(),
-  summary: z.string().optional(),
-  followUpDraft: z.string().optional()
-});
-```
-
----
-
-### 4.4 Post-Call Snapshot Email (P4)
-
-**Trigger:** Extension sends `call_ended` WebSocket message → Worker finalizes call in D1 → triggers Resend API.
+**Trigger:** Extension sends `call_ended` → Worker finalizes call in D1 → triggers Resend API.
 
 **Resend Integration:**
-- API key stored in `wrangler secret put RESEND_API_KEY`
-- From: `snapshots@pitchly.ai` (verify domain or use Resend default)
-
-**Email Template (HTML):**
-
-```html
-Subject: Call Summary — {{objectionCount}} objections, sentiment: {{sentiment}}
-
-<h2>Your call just ended</h2>
-
-<div class="stats">
-  <div>⏱️ Duration: {{duration}}</div>
-  <div>🎤 You spoke: {{talkRatioYou}}%</div>
-  <div>🗣️ Prospect spoke: {{talkRatioThem}}%</div>
-  <div>📊 Sentiment: {{sentimentEmoji}} {{sentiment}}</div>
-</div>
-
-<h3>Objections Handled</h3>
-<ul>
-  {{#objections}}
-  <li>
-    {{type}} — {{#handledWell}}✅{{/handledWell}}{{^handledWell}}⚠️{{/handledWell}}
-    (confidence: {{confidence}}%)
-    {{^handledWell}}<br><small>Tip: {{tip}}</small>{{/handledWell}}
-  </li>
-  {{/objections}}
-</ul>
-
-<h3>💡 Suggested Follow-Up</h3>
-<blockquote>{{followUpDraft}}</blockquote>
-
-<div class="actions">
-  <a href="{{webhookUrl}}" class="btn">Log to CRM</a>
-</div>
-
-<footer>
-  {{#managerEmail}}Manager ({{managerEmail}}) was CC'd.{{/managerEmail}}
-</footer>
-```
+- API key stored via `wrangler secret put RESEND_API_KEY`
+- From: `Pitchly <snapshots@pitchly.ai>`
+- Styled HTML email with stats, objections, follow-up draft
+- Manager CC supported
 
 **Extension Settings (Popup):**
 ```typescript
@@ -276,27 +108,19 @@ interface PopupSettings {
   webhookUrl?: string;
 }
 ```
+Stored in `chrome.storage.local`. Auto-save on blur + explicit Save button.
 
-Stored in `chrome.storage.local`.
+### 4.5 Generic Webhook + Manager CC (P5) ✅
 
----
-
-### 4.5 Generic Webhook + Manager CC (P5)
-
-**Webhook:**
-- If `webhookUrl` is set in popup settings, worker POSTs snapshot JSON to that URL after call ends.
-- Format: Same JSON structure as email template variables.
-- Reps can paste Zapier/Make webhook URL to auto-forward to HubSpot/Slack/Notion.
-
-**Manager CC:**
-- If `managerEmail` set, Resend sends CC.
-- No auth needed. Rep configures their own manager.
+- Webhook POSTs snapshot JSON to configured URL after call ends
+- Zapier/Make compatible
+- Manager CC via Resend if `managerEmail` set
 
 ---
 
 ## 5. New Extension UI
 
-### 5.1 Popup Settings
+### 5.1 Popup Settings ✅
 
 ```
 ┌─────────────────────────┐
@@ -313,7 +137,7 @@ Stored in `chrome.storage.local`.
 └─────────────────────────┘
 ```
 
-### 5.2 HUD Layout (During Call)
+### 5.2 HUD Layout (During Call) ✅
 
 ```
 ┌──────────────────────────┐
@@ -328,84 +152,98 @@ Stored in `chrome.storage.local`.
 └──────────────────────────┘
 ```
 
+### 5.3 Post-Call Snapshot Panel ✅
+
+Replaces call meta after `call_ended`:
+- Duration, talk ratio, final sentiment stats (2x2 grid)
+- Objections list with type badges and confidence
+- Call summary
+- Follow-up draft with **Copy** button
+- Persistence status indicator
+
 ---
 
 ## 6. Worker Prompts
 
-### 6.1 Sentiment Analysis (Post-Call)
+### 6.1 Objection Classification ✅
 
-```typescript
-const SENTIMENT_SYSTEM_PROMPT = `You are a sales call analyst.
-Analyze the following transcript and provide:
-1. Overall sentiment: 'strong', 'neutral', or 'at_risk'
-2. Sentiment arc: identify 2-3 key moments where sentiment shifted
-3. Root cause for each shift
-4. One actionable tip for the rep
+Upgraded with:
+- 5-step chain-of-thought reasoning
+- Explicit confidence calibration rubric
+- 8 few-shot examples
+- 6 anti-hallucination rules
+- Exact Knowledge Base script enforcement
 
-Transcript format: [timestamp] Speaker: Text
+See `worker/src/prompts.ts` for full prompt.
 
-Return JSON:
-{
-  "overallSentiment": "strong|neutral|at_risk",
-  "shifts": [
-    { "time": "4:32", "from": "strong", "to": "neutral", "cause": "pricing mentioned", "tip": "Anchor to value before mentioning price" }
-  ]
-}`;
-```
+### 6.2 Post-Call Sentiment Analysis ✅
 
-### 6.2 Follow-Up Draft Generator
+Phase-based segmentation with evidence-based shift detection. Actionable tips per shift. No invented quotes.
 
-```typescript
-const FOLLOW_UP_PROMPT = `Write a concise follow-up email based on this call summary.
-Tone: professional but warm.
-Include: Thank you, recap key points, address any unresolved objections, propose next step.
+### 6.3 Follow-Up Draft Generator ✅
 
-Call Summary:
-- Objections: {{objections}}
-- Sentiment: {{sentiment}}
-- Key topics: {{topics}}
-
-Return plain text email body only.`;
-```
+80-150 word limit. Specific recap bullets. Direct objection acknowledgment. One clear next step. No generic filler.
 
 ---
 
 ## 7. Implementation Timeline
 
-| Week | Focus | Deliverable |
-|---|---|---|
-| **Week 1** | Dual-stream refactor | Mic/tab separated, cleaner STT, talk ratio calculation working |
-| **Week 2** | Talk ratio + sentiment HUD | Live HUD shows ratio bar + sentiment dot |
-| **Week 3** | D1 + snapshot generation | Calls persisted, post-call summary generated by Gemini |
-| **Week 4** | Resend email + webhook | Snapshot emails sent, webhook POST working, end-to-end test |
+| Week | Focus | Deliverable | Status |
+|---|---|---|---|
+| **Week 1** | Dual-stream refactor | Mic/tab separated, cleaner STT, talk ratio calculation working | ✅ |
+| **Week 2** | Talk ratio + sentiment HUD | Live HUD shows ratio bar + sentiment dot | ✅ |
+| **Week 3** | D1 + snapshot generation | Calls persisted, post-call summary generated by Gemini, email sent | ✅ |
+| **Week 4** | Validation + beta prep | Run test scenarios, verify end-to-end, onboard first beta users | 🔄 |
 
 ---
 
 ## 8. Success Metrics
 
-| Metric | Target |
-|---|---|
-| End-to-end call test (real Google Meet) | 5 calls without crashes |
-| Talk ratio accuracy | Within 10% of manual count |
-| Email delivery rate | >95% |
-| Time from call end to email | <30 seconds |
-| Rep forwards snapshot to manager | 3/5 beta reps do this voluntarily |
+| Metric | Target | Status |
+|---|---|---|
+| End-to-end call test (real Google Meet) | 5 calls without crashes | 🔄 In Progress |
+| Talk ratio accuracy | Within 10% of manual count | 🔄 To Validate |
+| Email delivery rate | >95% | 🔄 To Validate |
+| Time from call end to email | <30 seconds | 🔄 To Validate |
+| Rep forwards snapshot to manager | 3/5 beta reps do this voluntarily | 🔄 To Validate |
 
 ---
 
 ## 9. Risks & Mitigations
 
-| Risk | Mitigation |
-|---|---|
-| Dual-stream refactor breaks existing pipeline | Keep feature branch, test thoroughly before merge |
-| Resend free tier limits (100 emails/day) | Monitor, upgrade to paid if needed ($20/mo) |
-| D1 latency slows real-time features | Only write to D1 at call end, not during |
-| Sentiment keywords too naive | Add post-call Gemini override for summary accuracy |
+| Risk | Mitigation | Status |
+|---|---|---|
+| Dual-stream refactor breaks existing pipeline | Keep feature branch, test thoroughly before merge | ✅ Resolved |
+| Resend free tier limits (100 emails/day) | Monitor, upgrade to paid if needed ($20/mo) | 🔄 Monitoring |
+| D1 latency slows real-time features | Only write to D1 at call end, not during | ✅ Resolved |
+| Sentiment keywords too naive | Post-call Gemini override for summary accuracy | ✅ Implemented |
+| False positives in objection detection | Upgraded prompts with chain-of-thought + few-shot | ✅ Implemented |
 
 ---
 
-## 10. Open Questions
+## 10. Test Scenarios
 
-1. **Resend domain:** Do you own `pitchly.ai`? If not, use Resend's default sender.
-2. **Beta users:** Do you have 3-5 reps ready to test? Need them for Week 4 validation.
-3. **Zapier template:** Should we provide a pre-built Zapier template for HubSpot?
+See `TEST_SCENARIOS.md` for:
+- 6 persona-based sales scripts (A-F)
+- Sentiment stress test (rapid mood swings)
+- Talk ratio stress test (monologue vs silence)
+- Benchmark scoring rubric (80% pass threshold)
+
+---
+
+## 11. Deployment Info
+
+- **Worker URL:** `https://pitchly-worker.kumarbharath63.workers.dev`
+- **D1 Database:** `pitchly-db` (APAC)
+- **Model:** `gemini-3-flash-preview`
+- **Extension Default Host:** `pitchly-worker.kumarbharath63.workers.dev`
+
+---
+
+## 12. Open Questions
+
+1. **Beta users:** Do you have 3-5 reps ready to test? Need them for Week 4 validation.
+2. **Zapier template:** Should we provide a pre-built Zapier template for HubSpot?
+3. **Resend domain:** Do you own `pitchly.ai`? If not, current sender uses Resend default.
+
+(End of file)

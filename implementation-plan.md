@@ -1,217 +1,176 @@
-# SalesCoach AI MVP Implementation Plan
+# Pitchly MVP Implementation Plan
 
 ## Project Structure
 ```
-salescoach-mvp/
+salesCoach/
 ├── extension/
 │   ├── manifest.json          # MV3 config, permissions
 │   ├── background.ts          # Service worker, three-tier audio capture
-│   ├── content.ts             # Injected into tab, AgentClient WebSocket
-│   └── hud.ts                 # Floating streaming card UI
-└── worker/
-    └── src/
-        └── index.ts           # CallSessionAgent + routeAgentRequest
+│   ├── content.ts             # Injected into tab, WebSocket, audio streaming
+│   ├── popup.ts               # Extension popup UI with settings
+│   ├── popup.html             # Popup markup
+│   ├── popup.css              # Popup styles
+│   ├── hud.ts                 # Floating HUD: call-meta, objection cards, snapshot
+│   ├── types.ts               # Shared TypeScript types
+│   ├── audio-processor.ts     # AudioWorkletProcessor (IIFE build)
+│   ├── hud.css                # External HUD stylesheet
+│   └── build.mjs              # esbuild bundler
+├── worker/
+│   ├── src/
+│   │   ├── index.ts           # CallSessionAgent DO: STT, classification, persistence
+│   │   ├── schema.ts          # Zod schemas: ObjectionSchema, PostCallAnalysisSchema
+│   │   └── prompts.ts         # Upgraded prompts with chain-of-thought + few-shot
+│   ├── wrangler.toml          # Worker config: D1, DO, AI binding
+│   └── schema.sql             # D1 database schema
+├── TEST_SCENARIOS.md          # 6 benchmark sales scripts + stress tests
+├── PRD-phase2.md              # Phase 2 specification
+├── REMAINING_TASKS.md         # Deferred features tracker
+└── AGENTS.md                  # Agent operational notes
 ```
 
-## Phase 1: Project Setup & Manifest
+## Phase 1: Project Setup & Manifest ✅
 
-### 1.1 Create Project Directories
-- Create `extension/` directory- Create `worker/src/` directory
+- [x] Create `extension/` and `worker/src/` directories
+- [x] Implement `manifest.json` (MV3, tabCapture, activeTab, scripting, storage)
+- [x] Content scripts for Meet and Zoom domains
+- [x] Background service worker config
 
-### 1.2 Implement manifest.json
-Based on PRD specifications:
-- Manifest V3
-- Permissions: tabCapture, activeTab, scripting, storage
-- Host permissions for Google Meet and Zoom- Background service worker
-- Content scripts for Meet and Zoom domains
-- Action with default title
+## Phase 2: Background Service Worker (Audio Capture) ✅
 
-## Phase 2: Background Service Worker (Audio Capture)
+- [x] Three-tier audio capture with fallback logic
+  - Tier 1: Tab + mic mixed (best quality)
+  - Tier 2: Tab only (mic permission denied)
+  - Tier 3: Mic only (desktop apps fallback)
+- [x] `CaptureMode` type and `startCapture()` / `stopCapture()` functions
+- [x] `getTabStreamId()` via `chrome.tabCapture.getMediaStreamId()`
+- [x] Keepalive alarm to prevent MV3 service worker sleep
 
-### 2.1 Three-Tier Audio Capture Logic
-Implement `background.ts` with:
-- `CaptureMode` type: 'mixed' | 'tab' | 'mic-only'
-- `initCapture()` function with fallback logic:
-  1. Tier 1: Tab + mic mixed (best quality)
-  2. Tier 2: Tab only (mic permission denied)
-  3. Tier 3: Mic only (desktop apps fallback)
-- Helper functions: `mixStreams()`, `captureTab()`
-- Error handling for each tier
+## Phase 3: Cloudflare Worker (Agent Implementation) ✅
 
-### 2.2 Audio Processing Pipeline
-- AudioContext for mixing streams
-- ScriptProcessorNode for audio chunking
-- 4096 buffer size, mono audio
-- Send PCM float32 arrays to WebSocket
+- [x] `wrangler.toml` with AI binding, D1 database, Durable Object
+- [x] `CallSessionAgent` class extending `Agent<Env>`
+- [x] `ObjectionSchema` Zod schema for structured output
+- [x] `PostCallAnalysisSchema` Zod schema for post-call sentiment
+- [x] Upgraded `OBJECTION_PROMPT` with chain-of-thought + 8 few-shot examples
+- [x] `POST_CALL_SENTIMENT_PROMPT` with phase-based analysis
+- [x] `FOLLOW_UP_PROMPT` with 80-150 word limit
+- [x] `transcribe()` - Deepgram Nova-3 via Workers AI
+- [x] `isEndOfTurn()` - Flux smart-turn-v2 via Workers AI
+- [x] `classifyAndStream()` - Gemini via Vercel AI SDK v6
+- [x] `handleCallEnded()` - post-call analysis, D1 persistence, email, webhook
+- [x] `persistCall()` - parameterized D1 inserts
+- [x] `sendSnapshotEmail()` - Resend HTML email with escaped content
+- [x] `sendWebhook()` - fire-and-forget POST to configured URL
+- [x] Input validation: email regex, URL prefix check, length limits
+- [x] Security: escapeHtml, parameterized SQL, duration validation
 
-## Phase 3: Cloudflare Worker (Agent Implementation)
+## Phase 4: Extension Content Script ✅
 
-### 3.1 Project Configuration
-- `wrangler.toml` with:
-  - AI binding for Workers AI
-  - Durable Object binding for CallSessionAgent
-  - Vars including AI_MODEL
-  - Migration v1 for CallSessionAgent
+- [x] `startSession()` - WebSocket connection to worker
+- [x] `stopSession()` - cleanup, send `call_ended` with settings
+- [x] `handleAgentMessage()` - route all agent message types
+- [x] `startAudioStreaming()` - AudioContext + AudioWorklet setup
+- [x] Dual-stream: tab -> STT node, mic -> RMS node (mixed mode)
+- [x] Mic-only fallback: mic -> STT node
+- [x] Talk ratio calculation every 5s from RMS accumulators
+- [x] Settings loaded from `chrome.storage.local` and sent via WS
 
-### 3.2 CallSessionAgent Implementation
-In `worker/src/index.ts`:
-- Import agents, AI SDK, Zod
-- Define Env interface with API keys and bindings
-- ObjectionSchema Zod schema for structured output
-- OBJECTION_PROMPT with knowledge base and rules
-- CallSessionAgent class extending Agent<Env>
-  - utteranceBuffer for accumulating transcript
-  - onMessage handler for audio_chunk messages
-  - transcribe() method using Deepgram Nova-3
-  - isEndOfTurn() method using Flux smart-turn-v2
-  - classifyAndStream() method using Vercel AI SDK v6
-    - Gemini 2.5 Flash via @ai-sdk/google
-    - Streaming response with experimental_output
-    - Token-by-token streaming via WebSocket
-    - Confidence threshold check (≥0.75)
-- Export default fetch handler with routeAgentRequest
+## Phase 5: HUD (Heads-Up Display) Implementation ✅
 
-## Phase 4: Extension Content Script
+- [x] `initHUD()` - create DOM, inject styles, event listeners
+- [x] Persistent `sc-call-meta` during call:
+  - Talk ratio bar with color states
+  - Sentiment dot (green/yellow/red)
+  - Contextual nudge text
+- [x] `sc-objection-area` for streaming objection cards:
+  - Type badge with colors
+  - Token-by-token streaming text
+  - Confidence percentage
+  - Progress bar + auto-dismiss (15s)
+  - Hover pause, manual dismiss (X), Escape key
+- [x] `sc-snapshot` post-call panel:
+  - Stats grid (duration, talk ratio, sentiment)
+  - Objections list with badges
+  - Call summary
+  - Follow-up draft with Copy button
+  - Persistence status indicator
+- [x] Glassmorphism styling, dark/light mode support
+- [x] Accessibility: roles, aria-live, keyboard navigation, reduced motion
 
-### 4.1 AgentClient Connection
-In `content.ts`:
-- Import AgentClient from @cloudflare/agents/client
-- startSession() function:
-  - Create AgentClient instance
-  - Set up message event listener
-  - Handle three message types:
-    * stream_delta: append text to HUD
-    * objection_card: finalize HUD card
-    * no_objection: dismiss HUD
-  - Initiate audio capture with three-tier fallback
-  - Show notice for mic-only mode
-- streamAudioToAgent() function:
-  - AudioContext setup
-  - MediaStreamSource and ScriptProcessorNode
-  - onaudioprocess handler to send audio chunks
+## Phase 6: Popup UI ✅
 
-## Phase 5: HUD (Heads-Up Display) Implementation
+- [x] `popup.html` - Start/Stop button, status badge, audio mode
+- [x] Settings section: Worker URL, Your Email, Manager Email, Webhook URL
+- [x] `popup.ts` - load/save settings, auto-save on blur, visual feedback
+- [x] `popup.css` - premium dark theme with violet accent
+- [x] State sync with background worker
 
-### 5.1 HUD Initialization
-In `hud.ts`:
-- initHUD() function:
-  - Create div#salescoach-hud
-  - Apply best-practice styling from research
-  - Set initial display: none
-  - Append to document.body
-- startStreamingCard(objectionType) function:
-  - Set header with objection type label
-  - Show close button (×)
-  - Reset response text container
-  - Show card with display: block
-  - Reset dismiss timer
-- appendHUDText(delta) function:
-  - Append streaming text to response element- dismissHUDCard() function:
-  - Hide card
-  - Clear dismiss timer
+## Phase 7: D1 Database ✅
 
-### 5.2 HUD Styling Best Practices
-From ui-ux-research.md:
-- Position: fixed, bottom: 24px, right: 24px
-- Dimensions: width: 360px, max-width: 90vw
-- Styling: dark background with backdrop-filter, subtle border
-- Border-radius: 12px, padding: 16px
-- Typography: system-ui, 14px, proper line-height- Z-index: 999999
-- Shadow: 0 8px 32px rgba(0,0,0,0.4)
-- Animations: slide-in/fade-in transitions
-- Close button styling and hover effects
-- Streaming cursor effect (optional)
-- Reduced motion media query support
+- [x] `schema.sql` - calls, transcript_segments, objections tables
+- [x] Indexes: `idx_calls_rep_email`, `idx_calls_started_at`, `idx_segments_call_id`, `idx_objections_call_id`
+- [x] Remote database created: `pitchly-db` (APAC)
+- [x] Schema applied to production database
+- [x] All inserts parameterized via `.prepare().bind()`
 
-### 5.3 Accessibility Features
-- role="status" and aria-live="polite" on HUD container
-- Close button with proper aria-label
-- Keyboard navigation support (Tab, Enter/Space, Escape)
-- Color contrast compliance- Respect system preferences
+## Phase 8: Deployment & Production ✅
 
-## Phase 6: Integration & Testing
+- [x] `wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY`
+- [x] Worker deployed: `pitchly-worker.kumarbharath63.workers.dev`
+- [x] Extension rebuilt with deployed worker URL
+- [x] Extension builds clean: 4 bundles (background, content, popup, audio-processor)
+- [x] Both packages type-check clean (`tsc --noEmit`)
+- [x] Model: `gemini-3-flash-preview`
 
-### 6.1 WebSocket Message Flow
-- Extension → Worker: audio_chunk (PCM float32 array)
-- Worker → Extension: 
-  - stream_delta: {type: 'stream_delta', delta: 'token'}
-  - objection_card: {type: 'objection_card', card: {objection, response, confidence}}
-  - no_objection: {type: 'no_objection'}
+## Phase 9: Validation & Testing 🔄
 
-### 6.2 Error Handling & Edge Cases
-- WebSocket reconnection logic (built into AgentClient)
-- Audio capture failures and fallbacks
-- Permission denied handling
-- Network interruption recovery
-- Memory leak prevention (cleanup intervals/timeouts)
+### 9.1 Test Scenarios
+- [ ] Run Scenario A (The Skeptic) - 3 objections, sentiment arc
+- [ ] Run Scenario B (Budget Guardian) - price + timing + authority
+- [ ] Run Scenario C (Enthusiast) - no objections, strong sentiment
+- [ ] Run Scenario D (Ghost) - ghost + priority recovery
+- [ ] Run Scenario E (Committee) - authority + competitor + timing
+- [ ] Run Scenario F (ROI Calculator) - roi + complexity + price
+- [ ] Sentiment Stress Test - verify rapid flipping
+- [ ] Talk Ratio Stress Test - verify monologue detection
 
-### 6.3 Performance Optimization
-- Minimal DOM updates during streaming
-- Efficient audio processing (avoid unnecessary copying)
-- Proper cleanup of AudioContext and processors
-- GPU-accelerated CSS animations
-- Debounce rapid updates if needed
+### 9.2 Technical Validation
+- [ ] Verify D1 records after test call
+- [ ] Verify email snapshot arrives (if Resend configured)
+- [ ] Verify webhook payload received (if URL configured)
+- [ ] Measure end-to-end latency (< 3 seconds)
+- [ ] Test 30+ minute call duration
+- [ ] Verify agent hibernation between calls
 
-## Phase 7: Deployment & Beta Preparation
-
-### 7.1 Local Development Setup
-- bun install for dependencies
-- wrangler dev for local worker testing
-- Chrome extension loading (unpacked)
-- Console logging for debugging
-
-### 7.2 Cloudflare Deployment
-- wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY
-- wrangler deploy for production deployment
-- Verify worker endpoints are accessible
-
-### 7.3 Beta Distribution Preparation
-- Create unpacked extension distribution package
-- Document installation steps:
-  1. Download and unzip extension folder
-  2. Enable Developer mode in chrome://extensions
-  3. Click "Load unpacked" and select folder
-- Create beta user onboarding message- Prepare Loom demo recording script
-
-## Phase 8: Validation & Testing
-
-### 8.1 Audio Capture Testing
-- Test Tier 1 (tab+mic) on Google Meet/Zoom Web
-- Test Tier 3 (mic-only) fallback on Zoom Desktop
-- Verify notice appears for mic-only mode
-- Validate audio quality and latency### 8.2 End-to-End Testing
-- Test all 10 objection types trigger correctly
-- Measure end-to-end latency (<3 seconds)
-- Verify streaming text effect works smoothly- Test auto-dismiss (15s) and manual dismiss (X)
-- Confirm card appears in correct position
-- Test on various webpage layouts and zoom levels
-
-### 8.3 Performance Validation- Monitor CPU/memory usage during calls
-- Verify no significant impact on Zoom/Meet performance- Test extended call durations (30+ minutes)
-- Verify agent hibernation between calls (zero idle cost)
-
-## Success Criteria
+### 9.3 Success Criteria
 - [ ] Extension installs in under 2 minutes from zip file
 - [ ] Tier 1 audio capture works on Google Meet and Zoom Web
 - [ ] Tier 3 mic fallback activates on Zoom Desktop with notice
-- [ ] Speaking "this is too expensive" streams Price objection card within 3 seconds- [ ] Response text visibly types into card token by token
+- [ ] Speaking a price objection streams Price card within 3 seconds
+- [ ] Response text visibly types into card token by token
 - [ ] All 10 objection types trigger correctly in mock call test
 - [ ] Card auto-dismisses after 15 seconds
 - [ ] X button dismisses card immediately
 - [ ] Worker deployed to Cloudflare via wrangler deploy
 - [ ] Agent hibernates correctly between calls (zero idle cost)
-- [ ] Loom demo recorded showing real-time streaming card appearance
-- [ ] Loom link ready to send to 10 LinkedIn prospects
+- [ ] Post-call snapshot appears in HUD within 5 seconds of stop
+- [ ] Follow-up draft is contextually relevant and actionable
 
 ## Dependencies
+
 ### Worker Dependencies
-- bun add agents @cloudflare/agents ai @ai-sdk/google zod
+- agents, @cloudflare/agents, ai, @ai-sdk/google, zod
 
 ### Extension Dependencies (Dev Only)
-- bun add -d typescript @types/chrome
+- typescript, @types/chrome
 
-## Environment Variables
-- GOOGLE_GENERATIVE_AI_API_KEY (set via wrangler secret put)
-- AI_MODEL = "gemini-2.5-flash" (in wrangler.toml [vars])
+### Environment Variables
+- `GOOGLE_GENERATIVE_AI_API_KEY` (set via wrangler secret put)
+- `RESEND_API_KEY` (optional, for post-call email)
+- `AI_MODEL` in wrangler.toml [vars] - currently `gemini-3-flash-preview`
 
-This implementation plan provides a detailed roadmap for building the SalesCoach AI MVP Chrome extension following the PRD specifications and best practices researched. Each phase builds upon the previous one, ensuring a solid foundation for the real-time objection handling system.
+## Notes
+
+- No tests exist in this repo; verify manually by loading the extension and running test scenarios
+- See `TEST_SCENARIOS.md` for structured benchmark scripts
+- See `AGENTS.md` for operational notes and quick commands
