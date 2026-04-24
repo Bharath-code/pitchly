@@ -10,6 +10,7 @@ let dismissTimer: ReturnType<typeof setTimeout> | null = null
 let rafQueue: string[] = []
 let rafPending = false
 let isStreaming = false
+let callActive = false
 
 const AUTO_DISMISS_MS = 15_000
 
@@ -41,22 +42,38 @@ export function initHUD(): void {
 
   hud.innerHTML = `
     <div class="sc-card">
-      <div class="sc-header">
-        <div class="sc-header-left">
-          <span class="sc-objection-badge" id="sc-objection-badge"></span>
+      <div class="sc-call-meta" id="sc-call-meta">
+        <div class="sc-talk-bar-container">
+          <div class="sc-talk-bar" id="sc-talk-bar">
+            <div class="sc-talk-you" id="sc-talk-you" style="width:50%"></div>
+            <div class="sc-talk-them" id="sc-talk-them" style="width:50%"></div>
+          </div>
+          <div class="sc-talk-labels">
+            <span>🎤 You: <strong id="sc-you-pct">50%</strong></span>
+            <span class="sc-sentiment-dot sc-sentiment-neutral" id="sc-sentiment-dot" title="Sentiment: neutral">🟡</span>
+            <span>🗣️ Them: <strong id="sc-them-pct">50%</strong></span>
+          </div>
         </div>
-        <div class="sc-header-right">
-          <span class="sc-confidence" id="sc-confidence"></span>
-          <button class="sc-close" id="sc-close-btn" aria-label="Dismiss suggestion">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-              <path d="M1 1L13 13M13 1L1 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-            </svg>
-          </button>
-        </div>
+        <div class="sc-nudge" id="sc-nudge"></div>
       </div>
-      <div class="sc-response" id="sc-response-text"></div>
-      <div class="sc-progress" id="sc-progress">
-        <div class="sc-progress-bar" id="sc-progress-bar"></div>
+      <div class="sc-objection-area" id="sc-objection-area">
+        <div class="sc-header">
+          <div class="sc-header-left">
+            <span class="sc-objection-badge" id="sc-objection-badge"></span>
+          </div>
+          <div class="sc-header-right">
+            <span class="sc-confidence" id="sc-confidence"></span>
+            <button class="sc-close" id="sc-close-btn" aria-label="Dismiss suggestion">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                <path d="M1 1L13 13M13 1L1 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="sc-response" id="sc-response-text"></div>
+        <div class="sc-progress" id="sc-progress">
+          <div class="sc-progress-bar" id="sc-progress-bar"></div>
+        </div>
       </div>
     </div>
   `
@@ -89,15 +106,98 @@ export function initHUD(): void {
   })
 }
 
+// ─── Call-level HUD (persistent during call) ─────────────────────────────────
+export function showCallHUD(): void {
+  callActive = true
+  if (!hudEl) return
+  hudEl.classList.add('sc-visible')
+  // Ensure objection area is hidden until an objection fires
+  const area = document.getElementById('sc-objection-area')
+  if (area) area.classList.remove('sc-visible')
+}
+
+export function hideCallHUD(): void {
+  callActive = false
+  hudEl?.classList.remove('sc-visible')
+  clearDismissTimer()
+  stopProgressBar()
+  isStreaming = false
+  rafQueue = []
+  const area = document.getElementById('sc-objection-area')
+  if (area) area.classList.remove('sc-visible')
+}
+
+export function updateTalkRatio(you: number, them: number, nudge?: string): void {
+  const youBar = document.getElementById('sc-talk-you')
+  const themBar = document.getElementById('sc-talk-them')
+  const youPct = document.getElementById('sc-you-pct')
+  const themPct = document.getElementById('sc-them-pct')
+  const bar = document.getElementById('sc-talk-bar')
+  const nudgeEl = document.getElementById('sc-nudge')
+
+  if (youBar) youBar.style.width = `${you}%`
+  if (themBar) themBar.style.width = `${them}%`
+  if (youPct) youPct.textContent = `${you}%`
+  if (themPct) themPct.textContent = `${them}%`
+
+  if (bar) {
+    bar.classList.remove('sc-balanced', 'sc-yellow', 'sc-red')
+    if (you > 75) bar.classList.add('sc-red')
+    else if (you > 60) bar.classList.add('sc-yellow')
+    else bar.classList.add('sc-balanced')
+  }
+
+  if (nudgeEl) nudgeEl.textContent = nudge || ''
+}
+
+export function updateSentiment(state: 'strong' | 'neutral' | 'at_risk'): void {
+  const dot = document.getElementById('sc-sentiment-dot')
+  if (!dot) return
+
+  dot.className = 'sc-sentiment-dot'
+  if (state === 'strong') {
+    dot.classList.add('sc-sentiment-strong')
+    dot.title = 'Sentiment: Strong'
+    dot.textContent = '🟢'
+  } else if (state === 'at_risk') {
+    dot.classList.add('sc-sentiment-at-risk')
+    dot.title = 'Sentiment: At Risk'
+    dot.textContent = '🔴'
+  } else {
+    dot.classList.add('sc-sentiment-neutral')
+    dot.title = 'Sentiment: Cooling'
+    dot.textContent = '🟡'
+  }
+}
+
+export function updateNudge(talkNudge?: string, sentimentNudge?: string): void {
+  const nudgeEl = document.getElementById('sc-nudge')
+  if (!nudgeEl) return
+  const parts: string[] = []
+  if (sentimentNudge) parts.push(sentimentNudge)
+  if (talkNudge) parts.push(talkNudge)
+  nudgeEl.textContent = parts.join('  •  ')
+}
+
 // ─── Show a new streaming card ────────────────────────────────────────────────
 export function startStreamingCard(objectionType: ObjectionType): void {
   if (!hudEl || !responseEl) return
+
+  // Runtime guard: AI may stream an unknown objection type
+  const colors = OBJECTION_COLORS[objectionType]
+  if (!colors) {
+    console.warn('[Pitchly] Unknown objection type:', objectionType)
+    return
+  }
 
   isStreaming = true
   rafQueue = []
   rafPending = false
 
-  const colors = OBJECTION_COLORS[objectionType]
+  // Ensure call HUD is visible and objection area is shown
+  showCallHUD()
+  const area = document.getElementById('sc-objection-area')
+  if (area) area.classList.add('sc-visible')
   const badge = document.getElementById('sc-objection-badge')
   if (badge) {
     badge.textContent = objectionType.replace(/_/g, ' ')
@@ -114,17 +214,11 @@ export function startStreamingCard(objectionType: ObjectionType): void {
 
   startProgressBar()
 
-  // Reset and show with staggered entrance
-  hudEl.classList.remove('sc-visible')
   const card = hudEl.querySelector('.sc-card') as HTMLElement
   if (card) {
     card.style.borderColor = colors.border
     card.style.boxShadow = `0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px ${colors.border}, 0 0 20px ${colors.glow}`
   }
-
-  requestAnimationFrame(() => {
-    hudEl!.classList.add('sc-visible')
-  })
 
   clearDismissTimer()
 }
@@ -170,11 +264,17 @@ export function finalizeHUDCard(card: ObjectionCard): void {
 
 // ─── Dismiss card ─────────────────────────────────────────────────────────────
 export function dismissHUDCard(): void {
-  hudEl?.classList.remove('sc-visible')
   clearDismissTimer()
   stopProgressBar()
   isStreaming = false
   rafQueue = []
+
+  const area = document.getElementById('sc-objection-area')
+  if (area) area.classList.remove('sc-visible')
+
+  if (!callActive) {
+    hudEl?.classList.remove('sc-visible')
+  }
 }
 
 // ─── Notice banner ────────────────────────────────────────────────────────────
@@ -399,6 +499,68 @@ function getInlineCSS(): string {
       padding-top: 10px;
       border-top: 1px solid rgba(255,255,255,0.06);
     }
+    .sc-call-meta {
+      padding: 14px 18px 12px;
+    }
+    .sc-talk-bar-container {
+      margin-bottom: 6px;
+    }
+    .sc-talk-bar {
+      display: flex;
+      height: 5px;
+      border-radius: 3px;
+      overflow: hidden;
+      background: rgba(255,255,255,0.06);
+      margin-bottom: 8px;
+    }
+    .sc-talk-you {
+      height: 100%;
+      background: #10b981;
+      transition: width 400ms cubic-bezier(0.4, 0, 0.2, 1), background 300ms ease;
+    }
+    .sc-talk-them {
+      height: 100%;
+      background: #3b82f6;
+      transition: width 400ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .sc-talk-bar.sc-yellow .sc-talk-you {
+      background: #f59e0b;
+    }
+    .sc-talk-bar.sc-red .sc-talk-you {
+      background: #ef4444;
+    }
+    .sc-talk-labels {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11.5px;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+    .sc-sentiment-dot {
+      font-size: 10px;
+      line-height: 1;
+      user-select: none;
+    }
+    .sc-nudge {
+      font-size: 11px;
+      color: #fbbf24;
+      text-align: center;
+      margin-top: 6px;
+      min-height: 16px;
+      font-weight: 600;
+      transition: opacity 300ms ease;
+    }
+    .sc-objection-area {
+      display: none;
+      padding: 0 18px 14px;
+    }
+    .sc-objection-area.sc-visible {
+      display: block;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      padding-top: 12px;
+      margin-top: 2px;
+    }
     @media (prefers-reduced-motion: reduce) {
       #pitchly-hud, .sc-card, .sc-close {
         transition: none;
@@ -418,6 +580,10 @@ function getInlineCSS(): string {
       .sc-close { color: #94a3b8; background: rgba(0,0,0,0.04); border-color: rgba(0,0,0,0.08); }
       .sc-close:hover { background: rgba(0,0,0,0.06); color: #1e293b; }
       .sc-confidence { color: #94a3b8; }
+      .sc-talk-bar { background: rgba(0,0,0,0.08); }
+      .sc-talk-labels { color: #64748b; }
+      .sc-nudge { color: #b45309; }
+      .sc-objection-area.sc-visible { border-top-color: rgba(0,0,0,0.08); }
     }
   `
 }

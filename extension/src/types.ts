@@ -35,11 +35,14 @@ export type ClientMessage =
   | { type: 'talk_ratio'; you: number; them: number }
   | { type: 'call_ended'; durationMs: number }
 
+export type SentimentState = 'strong' | 'neutral' | 'at_risk'
+
 // Messages from Cloudflare Worker → Extensions (via WebSocket)
 export type AgentMessage =
   | { type: 'stream_delta'; delta: string }
   | { type: 'objection_start'; objection: ObjectionType }
   | { type: 'objection_card'; card: ObjectionCard }
   | { type: 'no_objection' }
-  | { type: 'talk_ratio'; you: number; them: number }
+  | { type: 'talk_ratio'; you: number; them: number; nudge?: string; sentiment?: SentimentState; sentimentNudge?: string }
+  | { type: 'sentiment'; state: SentimentState; nudge?: string }
   | { type: 'error'; message: string }

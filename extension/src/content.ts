@@ -1,7 +1,7 @@
 // content.ts — Injected into Google Meet and Zoom tabs
 // Responsibilities: HUD init, AgentClient WebSocket, audio streaming (dual-stream)
 
-import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice } from './hud'
+import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice, showCallHUD, hideCallHUD, updateTalkRatio, updateSentiment, updateNudge } from './hud'
 import type { AgentMessage, ExtMessage } from './types'
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -55,6 +55,7 @@ async function startSession(tabStreamId?: string): Promise<void> {
       isConnected = true
       isStarting = false
       callStartTime = Date.now()
+      showCallHUD()
       console.log('[Pitchly] WebSocket connected')
     })
 
@@ -67,7 +68,7 @@ async function startSession(tabStreamId?: string): Promise<void> {
       // If streams are still alive, the close was unexpected — clean up
       if (activeStreams.length > 0) {
         cleanupAudio()
-        dismissHUDCard()
+        hideCallHUD()
       }
     })
 
@@ -101,7 +102,7 @@ function stopSession(): void {
   isConnected = false
   isStarting = false
   callStartTime = 0
-  dismissHUDCard()
+  hideCallHUD()
 }
 
 // Stop all media tracks and close audio context
@@ -155,8 +156,9 @@ function handleAgentMessage(event: MessageEvent<string>): void {
       break
 
     case 'talk_ratio':
-      // TODO(Week 2): Render talk ratio in HUD
-      console.log('[Pitchly] Talk ratio — You:', msg.you + '%', 'Them:', msg.them + '%')
+      updateTalkRatio(msg.you, msg.them)
+      updateNudge(msg.nudge, msg.sentimentNudge)
+      if (msg.sentiment) updateSentiment(msg.sentiment)
       break
 
     case 'error':
