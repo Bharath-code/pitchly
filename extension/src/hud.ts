@@ -1,7 +1,7 @@
-// hud.ts — Floating heads-up display for streaming objection cards
+// hud.ts — Floating heads-up display for streaming objection cards + post-call snapshot
 // Pure DOM manipulation — no framework, no dependencies
 
-import type { ObjectionCard, ObjectionType } from './types'
+import type { ObjectionCard, ObjectionType, SnapshotPreview } from './types'
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let hudEl: HTMLDivElement | null = null
@@ -75,6 +75,17 @@ export function initHUD(): void {
           <div class="sc-progress-bar" id="sc-progress-bar"></div>
         </div>
       </div>
+      <div class="sc-snapshot" id="sc-snapshot">
+        <div class="sc-snapshot-header">
+          <span class="sc-snapshot-title">Call Summary</span>
+          <button class="sc-close" id="sc-snapshot-close" aria-label="Dismiss summary">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M1 1L13 13M13 1L1 13" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+        <div class="sc-snapshot-body" id="sc-snapshot-body"></div>
+      </div>
     </div>
   `
 
@@ -83,6 +94,7 @@ export function initHUD(): void {
   responseEl = document.getElementById('sc-response-text') as HTMLDivElement
 
   document.getElementById('sc-close-btn')!.addEventListener('click', dismissHUDCard)
+  document.getElementById('sc-snapshot-close')!.addEventListener('click', hideSnapshot)
 
   hud.addEventListener('mouseenter', pauseDismissTimer)
   hud.addEventListener('mouseleave', () => {
@@ -111,9 +123,9 @@ export function showCallHUD(): void {
   callActive = true
   if (!hudEl) return
   hudEl.classList.add('sc-visible')
-  // Ensure objection area is hidden until an objection fires
   const area = document.getElementById('sc-objection-area')
   if (area) area.classList.remove('sc-visible')
+  hideSnapshot()
 }
 
 export function hideCallHUD(): void {
@@ -183,7 +195,6 @@ export function updateNudge(talkNudge?: string, sentimentNudge?: string): void {
 export function startStreamingCard(objectionType: ObjectionType): void {
   if (!hudEl || !responseEl) return
 
-  // Runtime guard: AI may stream an unknown objection type
   const colors = OBJECTION_COLORS[objectionType]
   if (!colors) {
     console.warn('[Pitchly] Unknown objection type:', objectionType)
@@ -194,10 +205,11 @@ export function startStreamingCard(objectionType: ObjectionType): void {
   rafQueue = []
   rafPending = false
 
-  // Ensure call HUD is visible and objection area is shown
   showCallHUD()
   const area = document.getElementById('sc-objection-area')
   if (area) area.classList.add('sc-visible')
+  hideSnapshot()
+
   const badge = document.getElementById('sc-objection-badge')
   if (badge) {
     badge.textContent = objectionType.replace(/_/g, ' ')
@@ -298,6 +310,112 @@ export function showNotice(message: string): void {
   }, 8000)
 }
 
+// ─── Snapshot Preview (post-call) ────────────────────────────────────────────
+export function showSnapshotPreview(snapshot: SnapshotPreview): void {
+  const snapshotEl = document.getElementById('sc-snapshot')
+  const bodyEl = document.getElementById('sc-snapshot-body')
+  if (!snapshotEl || !bodyEl) return
+
+  const durationMin = Math.floor(snapshot.durationMs / 60000)
+  const durationSec = Math.floor((snapshot.durationMs % 60000) / 1000)
+  const sentimentEmoji = snapshot.finalSentiment === 'strong' ? '🟢' : snapshot.finalSentiment === 'at_risk' ? '🔴' : '🟡'
+  const objections = snapshot.objections || []
+
+  bodyEl.innerHTML = `
+    <div class="sc-snapshot-stats">
+      <div class="sc-snapshot-stat">
+        <span class="sc-snapshot-stat-label">Duration</span>
+        <span class="sc-snapshot-stat-value">${durationMin}m ${durationSec}s</span>
+      </div>
+      <div class="sc-snapshot-stat">
+        <span class="sc-snapshot-stat-label">You spoke</span>
+        <span class="sc-snapshot-stat-value">${snapshot.talkRatioYou}%</span>
+      </div>
+      <div class="sc-snapshot-stat">
+        <span class="sc-snapshot-stat-label">Prospect spoke</span>
+        <span class="sc-snapshot-stat-value">${snapshot.talkRatioThem}%</span>
+      </div>
+      <div class="sc-snapshot-stat">
+        <span class="sc-snapshot-stat-label">Sentiment</span>
+        <span class="sc-snapshot-stat-value">${sentimentEmoji} ${snapshot.finalSentiment}</span>
+      </div>
+    </div>
+
+    ${objections.length > 0 ? `
+      <div class="sc-snapshot-section">
+        <h4 class="sc-snapshot-section-title">Objections (${objections.length})</h4>
+        <ul class="sc-snapshot-list">
+          ${objections.map(o => `
+            <li class="sc-snapshot-list-item">
+              <span class="sc-snapshot-list-badge" style="background:${OBJECTION_COLORS[o.type as ObjectionType]?.bg || 'rgba(255,255,255,0.06)'};color:${OBJECTION_COLORS[o.type as ObjectionType]?.text || '#94a3b8'};border-color:${OBJECTION_COLORS[o.type as ObjectionType]?.border || 'transparent'}">${o.type.replace(/_/g, ' ')}</span>
+              <span class="sc-snapshot-list-meta">${Math.round(o.confidence * 100)}%</span>
+            </li>
+          `).join('')}
+        </ul>
+      </div>
+    ` : ''}
+
+    ${snapshot.summary ? `
+      <div class="sc-snapshot-section">
+        <h4 class="sc-snapshot-section-title">Summary</h4>
+        <p class="sc-snapshot-text">${escapeHtml(snapshot.summary)}</p>
+      </div>
+    ` : ''}
+
+    ${snapshot.followUpDraft ? `
+      <div class="sc-snapshot-section">
+        <h4 class="sc-snapshot-section-title">Follow-Up Draft</h4>
+        <div class="sc-snapshot-draft">
+          <pre>${escapeHtml(snapshot.followUpDraft)}</pre>
+          <button class="sc-snapshot-copy" id="sc-copy-draft" aria-label="Copy follow-up draft">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            Copy
+          </button>
+        </div>
+      </div>
+    ` : ''}
+
+    <div class="sc-snapshot-footer">
+      ${snapshot.dbPersisted
+        ? '<span class="sc-snapshot-status sc-snapshot-status--ok">✓ Saved to Pitchly</span>'
+        : '<span class="sc-snapshot-status sc-snapshot-status--warn">⚠ Not saved — check connection</span>'}
+    </div>
+  `
+
+  snapshotEl.classList.add('sc-visible')
+  hudEl?.classList.add('sc-visible')
+
+  // Hide call meta and objection area
+  document.getElementById('sc-call-meta')?.classList.add('sc-hidden')
+  document.getElementById('sc-objection-area')?.classList.remove('sc-visible')
+
+  // Wire copy button
+  document.getElementById('sc-copy-draft')?.addEventListener('click', async () => {
+    if (!snapshot.followUpDraft) return
+    try {
+      await navigator.clipboard.writeText(snapshot.followUpDraft)
+      const btn = document.getElementById('sc-copy-draft') as HTMLButtonElement
+      const original = btn.innerHTML
+      btn.textContent = 'Copied!'
+      setTimeout(() => { btn.innerHTML = original }, 1500)
+    } catch {
+      // Clipboard API may fail in some contexts
+    }
+  })
+}
+
+function hideSnapshot(): void {
+  const snapshotEl = document.getElementById('sc-snapshot')
+  if (snapshotEl) snapshotEl.classList.remove('sc-visible')
+  document.getElementById('sc-call-meta')?.classList.remove('sc-hidden')
+}
+
+function escapeHtml(text: string): string {
+  const div = document.createElement('div')
+  div.textContent = text
+  return div.innerHTML
+}
+
 // ─── Timer helpers ────────────────────────────────────────────────────────────
 function startDismissTimer(): void {
   clearDismissTimer()
@@ -394,6 +512,7 @@ function getInlineCSS(): string {
       opacity: 0;
       transition: transform 350ms cubic-bezier(0.34, 1.56, 0.64, 1),
                   opacity 250ms cubic-bezier(0.2, 0, 0, 1);
+      overflow: hidden;
     }
     #pitchly-hud.sc-visible .sc-card {
       transform: translateY(0) scale(1);
@@ -501,6 +620,10 @@ function getInlineCSS(): string {
     }
     .sc-call-meta {
       padding: 14px 18px 12px;
+      transition: opacity 250ms ease;
+    }
+    .sc-call-meta.sc-hidden {
+      display: none;
     }
     .sc-talk-bar-container {
       margin-bottom: 6px;
@@ -561,8 +684,163 @@ function getInlineCSS(): string {
       padding-top: 12px;
       margin-top: 2px;
     }
+
+    /* ── Snapshot Preview ── */
+    .sc-snapshot {
+      display: none;
+      padding: 14px 18px 16px;
+    }
+    .sc-snapshot.sc-visible {
+      display: block;
+    }
+    .sc-snapshot-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+    .sc-snapshot-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -0.01em;
+    }
+    .sc-snapshot-body {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .sc-snapshot-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .sc-snapshot-stat {
+      background: rgba(255,255,255,0.04);
+      padding: 10px 12px;
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .sc-snapshot-stat-label {
+      font-size: 10px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 600;
+    }
+    .sc-snapshot-stat-value {
+      font-size: 13px;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .sc-snapshot-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .sc-snapshot-section-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #94a3b8;
+      margin: 0;
+    }
+    .sc-snapshot-text {
+      font-size: 12.5px;
+      color: #cbd5e1;
+      line-height: 1.6;
+      margin: 0;
+    }
+    .sc-snapshot-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .sc-snapshot-list-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255,255,255,0.03);
+      padding: 8px 10px;
+      border-radius: 8px;
+    }
+    .sc-snapshot-list-badge {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: capitalize;
+      padding: 3px 8px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+    }
+    .sc-snapshot-list-meta {
+      font-size: 11px;
+      color: #64748b;
+      font-weight: 600;
+    }
+    .sc-snapshot-draft {
+      background: rgba(139,92,246,0.06);
+      border-left: 3px solid #7c3aed;
+      border-radius: 0 10px 10px 0;
+      padding: 12px 14px;
+      position: relative;
+    }
+    .sc-snapshot-draft pre {
+      font-family: 'Inter', system-ui, sans-serif;
+      font-size: 12.5px;
+      color: #cbd5e1;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+      padding: 0;
+      background: none;
+      border: none;
+    }
+    .sc-snapshot-copy {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      border: 1px solid rgba(139,92,246,0.2);
+      background: rgba(13,13,28,0.8);
+      color: var(--violet-400);
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 150ms ease, border-color 150ms ease;
+    }
+    .sc-snapshot-copy:hover {
+      background: rgba(139,92,246,0.1);
+      border-color: rgba(139,92,246,0.35);
+    }
+    .sc-snapshot-footer {
+      padding-top: 10px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+      margin-top: 4px;
+    }
+    .sc-snapshot-status {
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .sc-snapshot-status--ok {
+      color: var(--success);
+    }
+    .sc-snapshot-status--warn {
+      color: var(--warning);
+    }
+
     @media (prefers-reduced-motion: reduce) {
-      #pitchly-hud, .sc-card, .sc-close {
+      #pitchly-hud, .sc-card, .sc-close, .sc-snapshot {
         transition: none;
       }
       .sc-response.sc-streaming::after {
@@ -584,6 +862,11 @@ function getInlineCSS(): string {
       .sc-talk-labels { color: #64748b; }
       .sc-nudge { color: #b45309; }
       .sc-objection-area.sc-visible { border-top-color: rgba(0,0,0,0.08); }
+      .sc-snapshot-title { color: #0f172a; }
+      .sc-snapshot-stat-value { color: #1e293b; }
+      .sc-snapshot-text { color: #334155; }
+      .sc-snapshot-draft { background: rgba(139,92,246,0.04); }
+      .sc-snapshot-draft pre { color: #334155; }
     }
   `
 }

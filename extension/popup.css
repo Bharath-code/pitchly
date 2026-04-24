@@ -16,13 +16,13 @@
   --surface-hover: #1a1a2e;
   --border: rgba(139, 92, 246, 0.15);
   --border-hover: rgba(139, 92, 246, 0.3);
-  
-  /* Primary violet — energetic but professional */
+
+  /* Primary violet */
   --violet-400: #a78bfa;
   --violet-500: #8b5cf6;
   --violet-600: #7c3aed;
   --violet-700: #6d28d9;
-  
+
   /* Semantic colors */
   --success: #34d399;
   --success-bg: rgba(52, 211, 153, 0.08);
@@ -30,13 +30,13 @@
   --warning-bg: rgba(251, 191, 36, 0.08);
   --error: #f87171;
   --error-bg: rgba(248, 113, 113, 0.08);
-  
+
   /* Text */
   --text: #f1f5f9;
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
-  
-  /* Radii — concentric system */
+
+  /* Radii */
   --radius-xl: 16px;
   --radius-lg: 12px;
   --radius-md: 10px;
@@ -61,7 +61,7 @@ body {
   padding: 20px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 /* ── Header ── */
@@ -139,12 +139,12 @@ body {
 }
 
 @keyframes pulse-glow {
-  0%, 100% { 
-    opacity: 1; 
+  0%, 100% {
+    opacity: 1;
     box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.2);
   }
-  50% { 
-    opacity: 0.85; 
+  50% {
+    opacity: 0.85;
     box-shadow: 0 0 0 4px rgba(52, 211, 153, 0);
   }
 }
@@ -227,7 +227,6 @@ body {
   outline-offset: 2px;
 }
 
-/* Button content layout */
 .btn-content {
   display: flex;
   align-items: center;
@@ -297,17 +296,37 @@ body {
   border: 1px solid rgba(251, 191, 36, 0.2);
 }
 
-/* ── Config section ── */
-.config-section {
+/* ── Settings Section ── */
+.settings-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 12px;
 }
 
-.config-header {
+.settings-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.settings-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.settings-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.config-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .config-label {
@@ -316,6 +335,16 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.config-optional {
+  font-weight: 500;
+  opacity: 0.7;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .config-input {
@@ -325,8 +354,8 @@ body {
   border: 1px solid rgba(255,255,255,0.08);
   background: rgba(255,255,255,0.03);
   color: var(--text-secondary);
-  font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
-  font-size: 11px;
+  font-family: 'Inter', system-ui, sans-serif;
+  font-size: 12px;
   outline: none;
   transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
 }
@@ -345,6 +374,51 @@ body {
 
 .config-input::placeholder {
   color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.config-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  margin-top: -2px;
+}
+
+/* ── Save Settings Button ── */
+.save-settings-btn {
+  width: 100%;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  background: transparent;
+  color: var(--violet-400);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.01em;
+  transition: background 200ms ease, color 200ms ease, border-color 200ms ease, transform 100ms ease;
+}
+
+.save-settings-btn:hover {
+  background: rgba(139, 92, 246, 0.08);
+  border-color: rgba(139, 92, 246, 0.35);
+  color: var(--violet-400);
+}
+
+.save-settings-btn:active {
+  transform: scale(0.97);
+}
+
+.save-settings-btn:focus-visible {
+  outline: 2px solid var(--violet-500);
+  outline-offset: 2px;
+}
+
+.save-settings-btn.saved {
+  background: var(--success-bg);
+  color: var(--success);
+  border-color: rgba(52, 211, 153, 0.25);
 }
 
 /* ── Divider ── */
@@ -380,10 +454,11 @@ body {
   .start-stop-btn,
   .status-badge,
   .mode-badge,
-  .config-input {
+  .config-input,
+  .save-settings-btn {
     transition: none;
   }
-  
+
   .status-listening {
     animation: none;
   }

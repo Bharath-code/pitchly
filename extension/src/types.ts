@@ -20,9 +20,17 @@ export interface ObjectionCard {
   confidence: number
 }
 
+// Popup settings persisted in chrome.storage.local
+export interface PopupSettings {
+  workerHost: string | undefined
+  repEmail: string | undefined
+  managerEmail: string | undefined
+  webhookUrl: string | undefined
+}
+
 // Messages between background ↔ content ↔ popup
 export type ExtMessage =
-  | { type: 'START_SESSION'; tabStreamId?: string }
+  | { type: 'START_SESSION'; tabStreamId: string | undefined }
   | { type: 'STOP_SESSION' }
   | { type: 'GET_STATUS' }
   | { type: 'GET_STREAM' }
@@ -33,9 +41,30 @@ export type ExtMessage =
 export type ClientMessage =
   | { type: 'audio_chunk'; data: number[] }
   | { type: 'talk_ratio'; you: number; them: number }
-  | { type: 'call_ended'; durationMs: number }
+  | { type: 'call_ended'; durationMs: number; repEmail: string | undefined; managerEmail: string | undefined; webhookUrl: string | undefined }
+  | { type: 'session_settings'; repEmail: string | undefined; managerEmail: string | undefined; webhookUrl: string | undefined }
 
 export type SentimentState = 'strong' | 'neutral' | 'at_risk'
+
+export type SnapshotObjection = {
+  type: string
+  confidence: number
+  response: string
+  timestamp: number
+}
+
+export type SnapshotPreview = {
+  type: 'snapshot_preview'
+  callId: string
+  durationMs: number
+  talkRatioYou: number
+  talkRatioThem: number
+  finalSentiment: SentimentState
+  summary: string | undefined
+  followUpDraft: string | undefined
+  objections: SnapshotObjection[]
+  dbPersisted: boolean
+}
 
 // Messages from Cloudflare Worker → Extensions (via WebSocket)
 export type AgentMessage =
@@ -43,6 +72,8 @@ export type AgentMessage =
   | { type: 'objection_start'; objection: ObjectionType }
   | { type: 'objection_card'; card: ObjectionCard }
   | { type: 'no_objection' }
-  | { type: 'talk_ratio'; you: number; them: number; nudge?: string; sentiment?: SentimentState; sentimentNudge?: string }
-  | { type: 'sentiment'; state: SentimentState; nudge?: string }
+  | { type: 'talk_ratio'; you: number; them: number; nudge: string | undefined; sentiment: SentimentState | undefined; sentimentNudge: string | undefined }
+  | { type: 'sentiment'; state: SentimentState; nudge: string | undefined }
   | { type: 'error'; message: string }
+  | { type: 'call_ended_ack'; durationMs: number }
+  | SnapshotPreview

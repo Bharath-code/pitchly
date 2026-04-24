@@ -42,19 +42,65 @@
     <!-- Divider -->
     <div class="divider"></div>
 
-    <!-- Worker Host Config -->
-    <div class="config-section">
-      <div class="config-header">
-        <label for="worker-host" class="config-label">Worker URL</label>
+    <!-- Settings Section -->
+    <div class="settings-section">
+      <div class="settings-header">
+        <span class="settings-title">Settings</span>
+        <span class="settings-hint">Used for post-call summary</span>
       </div>
-      <input
-        id="worker-host"
-        type="text"
-        class="config-input"
-        placeholder="your-worker.workers.dev"
-        spellcheck="false"
-        autocomplete="off"
-      />
+
+      <div class="config-section">
+        <label for="worker-host" class="config-label">Worker URL</label>
+        <input
+          id="worker-host"
+          type="text"
+          class="config-input"
+          placeholder="your-worker.workers.dev"
+          spellcheck="false"
+          autocomplete="off"
+        />
+      </div>
+
+      <div class="config-section">
+        <label for="rep-email" class="config-label">Your Email</label>
+        <input
+          id="rep-email"
+          type="email"
+          class="config-input"
+          placeholder="sarah@company.com"
+          spellcheck="false"
+          autocomplete="email"
+        />
+      </div>
+
+      <div class="config-section">
+        <label for="manager-email" class="config-label">Manager Email <span class="config-optional">(optional)</span></label>
+        <input
+          id="manager-email"
+          type="email"
+          class="config-input"
+          placeholder="mike@company.com"
+          spellcheck="false"
+          autocomplete="off"
+        />
+      </div>
+
+      <div class="config-section">
+        <label for="webhook-url" class="config-label">Webhook URL <span class="config-optional">(optional)</span></label>
+        <input
+          id="webhook-url"
+          type="text"
+          class="config-input"
+          placeholder="https://hooks.zapier.com/..."
+          spellcheck="false"
+          autocomplete="off"
+        />
+        <span class="config-hint">Zapier, Make, or any HTTP endpoint</span>
+      </div>
+
+      <button id="save-settings-btn" class="save-settings-btn" aria-label="Save settings">
+        Save Settings
+      </button>
     </div>
 
     <!-- Footer -->

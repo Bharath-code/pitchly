@@ -1,8 +1,8 @@
 // content.ts — Injected into Google Meet and Zoom tabs
 // Responsibilities: HUD init, AgentClient WebSocket, audio streaming (dual-stream)
 
-import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice, showCallHUD, hideCallHUD, updateTalkRatio, updateSentiment, updateNudge } from './hud'
-import type { AgentMessage, ExtMessage } from './types'
+import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice, showCallHUD, hideCallHUD, updateTalkRatio, updateSentiment, updateNudge, showSnapshotPreview } from './hud'
+import type { AgentMessage, ExtMessage, PopupSettings } from './types'
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let ws: WebSocket | null = null
@@ -18,6 +18,14 @@ let micSampleCount = 0
 let tabEnergySum = 0
 let tabSampleCount = 0
 let talkRatioInterval: ReturnType<typeof setInterval> | null = null
+
+// Cached settings for this session
+let sessionSettings: PopupSettings = {
+  workerHost: undefined,
+  repEmail: undefined,
+  managerEmail: undefined,
+  webhookUrl: undefined,
+}
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 initHUD()
@@ -41,9 +49,16 @@ async function startSession(tabStreamId?: string): Promise<void> {
   isStarting = true
 
   try {
-    // Read worker host from storage (set via popup)
-    const storage = await chrome.storage.local.get('workerHost')
-    const workerHost = (storage.workerHost as string) || 'localhost:8787'
+    // Load settings from storage
+    const storage = await chrome.storage.local.get(['workerHost', 'repEmail', 'managerEmail', 'webhookUrl'])
+    sessionSettings = {
+      workerHost: storage.workerHost as string | undefined,
+      repEmail: storage.repEmail as string | undefined,
+      managerEmail: storage.managerEmail as string | undefined,
+      webhookUrl: storage.webhookUrl as string | undefined,
+    }
+
+    const workerHost = sessionSettings.workerHost || 'localhost:8787'
     const isLocal = workerHost.includes('localhost') || workerHost.includes('127.0.0.1')
     const protocol = isLocal ? 'ws' : 'wss'
 
@@ -57,6 +72,16 @@ async function startSession(tabStreamId?: string): Promise<void> {
       callStartTime = Date.now()
       showCallHUD()
       console.log('[Pitchly] WebSocket connected')
+
+      // Send settings immediately so worker has them even if call_ended misses
+      if (ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'session_settings',
+          repEmail: sessionSettings.repEmail,
+          managerEmail: sessionSettings.managerEmail,
+          webhookUrl: sessionSettings.webhookUrl,
+        }))
+      }
     })
 
     ws.addEventListener('message', handleAgentMessage)
@@ -65,7 +90,6 @@ async function startSession(tabStreamId?: string): Promise<void> {
       isConnected = false
       isStarting = false
       console.log(`[Pitchly] WebSocket closed: ${e.code} ${e.reason}`)
-      // If streams are still alive, the close was unexpected — clean up
       if (activeStreams.length > 0) {
         cleanupAudio()
         hideCallHUD()
@@ -92,7 +116,13 @@ function stopSession(): void {
   // Send call_ended before cleanup so worker can finalize
   if (ws?.readyState === WebSocket.OPEN && callStartTime > 0) {
     const durationMs = Date.now() - callStartTime
-    ws.send(JSON.stringify({ type: 'call_ended', durationMs }))
+    ws.send(JSON.stringify({
+      type: 'call_ended',
+      durationMs,
+      repEmail: sessionSettings.repEmail,
+      managerEmail: sessionSettings.managerEmail,
+      webhookUrl: sessionSettings.webhookUrl,
+    }))
   }
 
   cleanupAudio()
@@ -161,6 +191,10 @@ function handleAgentMessage(event: MessageEvent<string>): void {
       if (msg.sentiment) updateSentiment(msg.sentiment)
       break
 
+    case 'snapshot_preview':
+      showSnapshotPreview(msg)
+      break
+
     case 'error':
       console.error('[Pitchly] Agent error:', msg.message)
       break
@@ -170,7 +204,6 @@ function handleAgentMessage(event: MessageEvent<string>): void {
       break
 
     default:
-      // Exhaustiveness check + ignore unknown future message types
       console.warn('[Pitchly] Unknown agent message type:', (msg as AgentMessage).type)
   }
 }
@@ -187,8 +220,6 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
     let hasTab = !!tabStreamId
 
     // ── STT Node: sends audio to worker for Deepgram transcription ──
-    // In mixed mode this captures the prospect (tab).
-    // In mic-only mode this captures the rep (mic) as fallback.
     const sttNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
 
     sttNode.port.onmessage = (e: MessageEvent<{ pcm: Float32Array }>) => {

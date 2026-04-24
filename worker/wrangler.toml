@@ -4,8 +4,13 @@ compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
 # ── Workers AI binding ──────────────────────────────────────────────────────
-[[ai]]
-binding = "AI"
+ai = { binding = "AI" }
+
+# ── D1 Database ─────────────────────────────────────────────────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "pitchly-db"
+database_id = "7cdea935-99ac-4080-b3d2-5dfd119a6fb4"
 
 # ── Durable Objects ─────────────────────────────────────────────────────────
 [durable_objects]
@@ -14,20 +19,22 @@ bindings = [
 ]
 
 [[migrations]]
-tag = "v1"
-new_classes = ["CallSessionAgent"]
+tag = "v2"
+new_sqlite_classes = ["CallSessionAgent"]
 
 # ── Variables ────────────────────────────────────────────────────────────────
 [vars]
 # Default model — swap to any @ai-sdk/* provider via one env var change
-AI_MODEL = "gemini-2.5-flash"
-# AI_MODEL = "gemini-3-flash-preview"          # bleeding edge — opt-in
+AI_MODEL = "gemini-3-flash-preview"
+# AI_MODEL = "gemini-2.5-flash"                # stable fallback
 # AI_MODEL = "claude-haiku-4-20250514"         # switch when first revenue arrives
 
 # ── Secrets — set via CLI (never commit to git) ─────────────────────────────
 # wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY
 # wrangler secret put ANTHROPIC_API_KEY   (when switching to Claude)
+# wrangler secret put RESEND_API_KEY      (for post-call email)
 
 # ── Local dev overrides ──────────────────────────────────────────────────────
 # Create worker/.dev.vars (gitignored) with:
 # GOOGLE_GENERATIVE_AI_API_KEY=AIza...
+# RESEND_API_KEY=re_...
