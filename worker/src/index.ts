@@ -39,12 +39,19 @@ export class CallSessionAgent extends Agent<Env> {
   // Prevent concurrent classifications (one objection check at a time)
   private classifying = false
 
+  // Talk ratio history for this session
+  private talkRatios: Array<{ you: number; them: number; timestamp: number }> = []
+
   // Called when a new WebSocket connection opens
   async onConnect(connection: {
     id: string
     send: (data: string) => void
   }): Promise<void> {
     console.log(`[CallSessionAgent] Connection opened: ${connection.id}`)
+    // Reset per-session state
+    this.talkRatios = []
+    this.utteranceBuffer = []
+    this.classifying = false
     // Send a ready signal so the extension knows WS is live
     connection.send(JSON.stringify({ type: 'ready', connectionId: connection.id }))
   }
@@ -54,7 +61,7 @@ export class CallSessionAgent extends Agent<Env> {
     connection: { id: string; send: (data: string) => void },
     message: string
   ): Promise<void> {
-    let parsed: { type: string; data?: number[] }
+    let parsed: { type: string; data?: number[]; you?: number; them?: number; durationMs?: number }
 
     try {
       parsed = JSON.parse(message) as typeof parsed
@@ -65,6 +72,16 @@ export class CallSessionAgent extends Agent<Env> {
 
     if (parsed.type === 'audio_chunk' && parsed.data) {
       await this.processAudioChunk(connection, parsed.data)
+    } else if (parsed.type === 'talk_ratio' && typeof parsed.you === 'number' && typeof parsed.them === 'number') {
+      // Validate range
+      const you = Math.max(0, Math.min(100, parsed.you))
+      const them = Math.max(0, Math.min(100, parsed.them))
+      this.talkRatios.push({ you, them, timestamp: Date.now() })
+      console.log(`[CallSessionAgent] Talk ratio — You: ${you}% Them: ${them}%`)
+      // Echo back to extension so HUD can render it (Week 2)
+      connection.send(JSON.stringify({ type: 'talk_ratio', you, them }))
+    } else if (parsed.type === 'call_ended' && typeof parsed.durationMs === 'number') {
+      await this.handleCallEnded(connection, parsed.durationMs)
     }
     // Ignore unknown message types gracefully
   }
@@ -78,6 +95,33 @@ export class CallSessionAgent extends Agent<Env> {
     console.log(`[CallSessionAgent] Connection closed: ${connection.id}`)
     this.utteranceBuffer = []
     this.classifying = false
+    // Note: talkRatios is NOT reset here so handleCallEnded
+    // (which may be async) can access it even if the connection closes first.
+    // It is reset in onConnect for the next session.
+  }
+
+  // ─── Call Ended Handler ────────────────────────────────────────────────────
+  private async handleCallEnded(
+    connection: { id: string; send: (data: string) => void },
+    durationMs: number
+  ): Promise<void> {
+    console.log(`[CallSessionAgent] Call ended. Duration: ${Math.round(durationMs / 1000)}s`)
+
+    // TODO(Week 3): Persist to D1, generate snapshot, send email
+    // For now just log the accumulated talk ratios
+    const count = this.talkRatios.length
+    if (count > 0) {
+      const avgYou = Math.round(this.talkRatios.reduce((s, r) => s + r.you, 0) / count)
+      const avgThem = Math.round(this.talkRatios.reduce((s, r) => s + r.them, 0) / count)
+      console.log(`[CallSessionAgent] Avg talk ratio — You: ${avgYou}% Them: ${avgThem}%`)
+    }
+
+    // Acknowledge to extension (best-effort; connection may already be closing)
+    try {
+      connection.send(JSON.stringify({ type: 'call_ended_ack', durationMs }))
+    } catch {
+      // Connection may have closed — safe to ignore
+    }
   }
 
   // ─── Audio Processing Pipeline ─────────────────────────────────────────────

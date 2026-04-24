@@ -1,5 +1,5 @@
 // content.ts — Injected into Google Meet and Zoom tabs
-// Responsibilities: HUD init, AgentClient WebSocket, audio streaming
+// Responsibilities: HUD init, AgentClient WebSocket, audio streaming (dual-stream)
 
 import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice } from './hud'
 import type { AgentMessage, ExtMessage } from './types'
@@ -10,6 +10,14 @@ let audioCtx: AudioContext | null = null
 let isConnected = false
 let isStarting = false           // Guards against concurrent startSession calls
 let activeStreams: MediaStream[] = [] // Tracked for cleanup on stop
+let callStartTime = 0
+
+// Talk ratio accumulators
+let micEnergySum = 0
+let micSampleCount = 0
+let tabEnergySum = 0
+let tabSampleCount = 0
+let talkRatioInterval: ReturnType<typeof setInterval> | null = null
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 initHUD()
@@ -46,6 +54,7 @@ async function startSession(tabStreamId?: string): Promise<void> {
     ws.addEventListener('open', () => {
       isConnected = true
       isStarting = false
+      callStartTime = Date.now()
       console.log('[Pitchly] WebSocket connected')
     })
 
@@ -79,17 +88,29 @@ async function startSession(tabStreamId?: string): Promise<void> {
 }
 
 function stopSession(): void {
+  // Send call_ended before cleanup so worker can finalize
+  if (ws?.readyState === WebSocket.OPEN && callStartTime > 0) {
+    const durationMs = Date.now() - callStartTime
+    ws.send(JSON.stringify({ type: 'call_ended', durationMs }))
+  }
+
   cleanupAudio()
 
   ws?.close(1000, 'User stopped session')
   ws = null
   isConnected = false
   isStarting = false
+  callStartTime = 0
   dismissHUDCard()
 }
 
 // Stop all media tracks and close audio context
 function cleanupAudio(): void {
+  if (talkRatioInterval) {
+    clearInterval(talkRatioInterval)
+    talkRatioInterval = null
+  }
+
   activeStreams.forEach((stream) => {
     stream.getTracks().forEach((track) => track.stop())
   })
@@ -97,6 +118,12 @@ function cleanupAudio(): void {
 
   audioCtx?.close().catch(() => {})
   audioCtx = null
+
+  // Reset accumulators
+  micEnergySum = 0
+  micSampleCount = 0
+  tabEnergySum = 0
+  tabSampleCount = 0
 }
 
 // ─── Message Handler ─────────────────────────────────────────────────────────
@@ -127,13 +154,26 @@ function handleAgentMessage(event: MessageEvent<string>): void {
       dismissHUDCard()
       break
 
+    case 'talk_ratio':
+      // TODO(Week 2): Render talk ratio in HUD
+      console.log('[Pitchly] Talk ratio — You:', msg.you + '%', 'Them:', msg.them + '%')
+      break
+
     case 'error':
       console.error('[Pitchly] Agent error:', msg.message)
       break
+
+    case 'call_ended_ack':
+      // Silently ignore — worker acknowledged call end
+      break
+
+    default:
+      // Exhaustiveness check + ignore unknown future message types
+      console.warn('[Pitchly] Unknown agent message type:', (msg as AgentMessage).type)
   }
 }
 
-// ─── Audio Streaming via AudioWorklet ────────────────────────────────────────
+// ─── Audio Streaming via AudioWorklet (Dual-Stream) ──────────────────────────
 async function startAudioStreaming(tabStreamId?: string): Promise<void> {
   try {
     audioCtx = new AudioContext({ sampleRate: 16000 })
@@ -142,10 +182,14 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
     const processorUrl = chrome.runtime.getURL('audio-processor.js')
     await audioCtx.audioWorklet.addModule(processorUrl)
 
-    const workletNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
+    let hasTab = !!tabStreamId
 
-    // Receive PCM chunks from audio thread and send to worker
-    workletNode.port.onmessage = (e: MessageEvent<{ pcm: Float32Array }>) => {
+    // ── STT Node: sends audio to worker for Deepgram transcription ──
+    // In mixed mode this captures the prospect (tab).
+    // In mic-only mode this captures the rep (mic) as fallback.
+    const sttNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
+
+    sttNode.port.onmessage = (e: MessageEvent<{ pcm: Float32Array }>) => {
       if (ws?.readyState === WebSocket.OPEN) {
         const pcm = e.data.pcm
         ws.send(
@@ -157,8 +201,28 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
       }
     }
 
+    // ── RMS Nodes: local volume analysis for talk ratio (mixed mode only) ──
+    let micRmsNode: AudioWorkletNode | null = null
+    let tabRmsNode: AudioWorkletNode | null = null
+
+    if (hasTab) {
+      micRmsNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
+      micRmsNode.port.onmessage = (e: MessageEvent<{ pcm: Float32Array }>) => {
+        const rms = calculateRMS(e.data.pcm)
+        micEnergySum += rms * rms * e.data.pcm.length
+        micSampleCount += e.data.pcm.length
+      }
+
+      tabRmsNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
+      tabRmsNode.port.onmessage = (e: MessageEvent<{ pcm: Float32Array }>) => {
+        const rms = calculateRMS(e.data.pcm)
+        tabEnergySum += rms * rms * e.data.pcm.length
+        tabSampleCount += e.data.pcm.length
+      }
+    }
+
     // Capture tab audio if stream ID was provided (browser meetings)
-    if (tabStreamId) {
+    if (hasTab) {
       try {
         const tabStream = await navigator.mediaDevices.getUserMedia({
           audio: {
@@ -170,14 +234,16 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
         } as unknown as MediaStreamConstraints)
         activeStreams.push(tabStream)
         const tabSource = audioCtx.createMediaStreamSource(tabStream)
-        tabSource.connect(workletNode)
+        tabSource.connect(sttNode)
+        tabSource.connect(tabRmsNode!)
         console.log('[Pitchly] Tab audio capture active')
       } catch (err) {
         console.warn('[Pitchly] Tab audio capture failed, using mic only:', err)
+        hasTab = false
       }
     }
 
-    // Always capture mic audio (sales rep's voice + speaker bleed)
+    // Always capture mic audio
     const micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         sampleRate: 16000,
@@ -188,14 +254,58 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
     })
     activeStreams.push(micStream)
     const micSource = audioCtx.createMediaStreamSource(micStream)
-    micSource.connect(workletNode)
 
-    console.log('[Pitchly] Audio streaming started (AudioWorklet)')
+    if (hasTab) {
+      // Mixed mode: mic goes to RMS node only (not sent to worker)
+      micSource.connect(micRmsNode!)
+    } else {
+      // Mic-only mode: mic is the only audio, send to worker for STT
+      micSource.connect(sttNode)
+    }
+
+    // Start periodic talk ratio calculation (every 5s)
+    if (hasTab) {
+      talkRatioInterval = setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return
+        if (micSampleCount === 0 && tabSampleCount === 0) return
+
+        const micRMS = micSampleCount > 0 ? Math.sqrt(micEnergySum / micSampleCount) : 0
+        const tabRMS = tabSampleCount > 0 ? Math.sqrt(tabEnergySum / tabSampleCount) : 0
+        const total = micRMS + tabRMS
+
+        let you = 50
+        let them = 50
+        if (total > 0) {
+          you = Math.round((micRMS / total) * 100)
+          them = Math.round((tabRMS / total) * 100)
+        }
+
+        ws.send(JSON.stringify({ type: 'talk_ratio', you, them }))
+
+        // Reset accumulators
+        micEnergySum = 0
+        micSampleCount = 0
+        tabEnergySum = 0
+        tabSampleCount = 0
+      }, 5000)
+    }
+
+    console.log('[Pitchly] Audio streaming started (dual-stream, mode:', hasTab ? 'mixed' : 'mic-only', ')')
 
   } catch (err) {
     console.error('[Pitchly] Audio streaming failed:', err)
-    // Clean up any partial streams that may have been acquired
     cleanupAudio()
     showNotice('Audio capture failed — check microphone permissions')
   }
+}
+
+// ─── RMS Calculation ─────────────────────────────────────────────────────────
+function calculateRMS(samples: Float32Array): number {
+  if (samples.length === 0) return 0
+  let sum = 0
+  for (let i = 0; i < samples.length; i++) {
+    const s = samples[i]!
+    sum += s * s
+  }
+  return Math.sqrt(sum / samples.length)
 }
