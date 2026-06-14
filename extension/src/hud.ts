@@ -14,6 +14,16 @@ let callActive = false
 
 const AUTO_DISMISS_MS = 15_000
 
+// Feedback callback — set by content.ts to send feedback via WebSocket
+let feedbackHandler: ((helpful: boolean, objectionType: string) => void) | null = null
+
+// Tracking for first-time experiences (per page load)
+let firstObjectionHandled = false
+let onboardingShownThisSession = false
+
+// Last objection type for feedback
+let lastObjectionType = ''
+
 // ─── Objection type colors ───────────────────────────────────────────────────
 const OBJECTION_COLORS: Record<ObjectionType, { bg: string; text: string; border: string; glow: string }> = {
   price:      { bg: 'rgba(239, 68, 68, 0.12)',  text: '#f87171', border: 'rgba(239, 68, 68, 0.25)',  glow: 'rgba(239, 68, 68, 0.15)' },
@@ -42,6 +52,25 @@ export function initHUD(): void {
 
   hud.innerHTML = `
     <div class="sc-card">
+      <!-- Onboarding tooltip (hidden by default) -->
+      <div class="sc-onboarding" id="sc-onboarding">
+        <div class="sc-onboarding-content">
+          <span class="sc-onboarding-icon">👋</span>
+          <div class="sc-onboarding-text">
+            <strong>Pitchly is listening</strong>
+            <p>When a prospect raises an objection, a coaching card will appear here with a suggested response. Try saying <em>"this is too expensive"</em> to see it in action.</p>
+          </div>
+          <button class="sc-onboarding-close" id="sc-onboarding-close" aria-label="Dismiss onboarding">
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <path d="M1 1L13 13M13 1L1 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Celebration confetti container -->
+      <div class="sc-celebration" id="sc-celebration"></div>
+
       <div class="sc-call-meta" id="sc-call-meta">
         <div class="sc-talk-bar-container">
           <div class="sc-talk-bar" id="sc-talk-bar">
@@ -71,6 +100,19 @@ export function initHUD(): void {
           </div>
         </div>
         <div class="sc-response" id="sc-response-text"></div>
+        <div class="sc-feedback" id="sc-feedback" style="display:none;">
+          <span class="sc-feedback-label">Was this helpful?</span>
+          <div class="sc-feedback-buttons">
+            <button class="sc-feedback-btn sc-feedback-yes" id="sc-feedback-yes" aria-label="This was helpful">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3zM7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg>
+              Helpful
+            </button>
+            <button class="sc-feedback-btn sc-feedback-no" id="sc-feedback-no" aria-label="This was not helpful">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3z"/><path d="M17 2h2.5A1.5 1.5 0 0 1 21 3.5v8.5a1.5 1.5 0 0 1-1.5 1.5H17"/></svg>
+              Not Helpful
+            </button>
+          </div>
+        </div>
         <div class="sc-progress" id="sc-progress">
           <div class="sc-progress-bar" id="sc-progress-bar"></div>
         </div>
@@ -96,6 +138,17 @@ export function initHUD(): void {
   document.getElementById('sc-close-btn')!.addEventListener('click', dismissHUDCard)
   document.getElementById('sc-snapshot-close')!.addEventListener('click', hideSnapshot)
 
+  // Onboarding dismiss
+  document.getElementById('sc-onboarding-close')!.addEventListener('click', hideOnboarding)
+
+  // Feedback buttons
+  document.getElementById('sc-feedback-yes')!.addEventListener('click', () => {
+    sendFeedback(true)
+  })
+  document.getElementById('sc-feedback-no')!.addEventListener('click', () => {
+    sendFeedback(false)
+  })
+
   hud.addEventListener('mouseenter', pauseDismissTimer)
   hud.addEventListener('mouseleave', () => {
     if (hudEl?.classList.contains('sc-visible')) resumeDismissTimer()
@@ -118,6 +171,100 @@ export function initHUD(): void {
   })
 }
 
+// ─── Onboarding Tooltip ───────────────────────────────────────────────────────
+function showOnboarding(): void {
+  const el = document.getElementById('sc-onboarding')
+  if (!el || onboardingShownThisSession) return
+  onboardingShownThisSession = true
+  // Also mark in storage so it doesn't show on next visit
+  try {
+    chrome.storage.local.set({ pitchly_onboarding_seen: true })
+  } catch {
+    // Content script may not have storage access in some contexts
+  }
+  el.classList.add('sc-onboarding-visible')
+  // Auto-hide after 8 seconds
+  setTimeout(hideOnboarding, 8000)
+}
+
+function hideOnboarding(): void {
+  const el = document.getElementById('sc-onboarding')
+  if (el) el.classList.remove('sc-onboarding-visible')
+}
+
+async function checkAndShowOnboarding(): Promise<void> {
+  if (onboardingShownThisSession) return
+  try {
+    const data = await chrome.storage.local.get('pitchly_onboarding_seen')
+    if (!data.pitchly_onboarding_seen) {
+      showOnboarding()
+    }
+  } catch {
+    // If storage fails (e.g. in testing), show onboarding anyway
+    showOnboarding()
+  }
+}
+
+// ─── Celebration Animation (first objection) ─────────────────────────────────
+function triggerCelebration(): void {
+  const container = document.getElementById('sc-celebration')
+  if (!container) return
+
+  // Clear any previous particles
+  container.innerHTML = ''
+
+  const colors = ['#a78bfa', '#7c3aed', '#34d399', '#fbbf24', '#f87171', '#60a5fa']
+  const particleCount = 24
+
+  for (let i = 0; i < particleCount; i++) {
+    const particle = document.createElement('div')
+    particle.className = 'sc-particle'
+    const color = colors[Math.floor(Math.random() * colors.length)]
+    const x = 40 + Math.random() * 20 // spread across center 20%
+    const delay = Math.random() * 0.2
+    const size = 4 + Math.random() * 6
+    const rotation = Math.random() * 360
+
+    particle.style.cssText = `
+      left: ${x}%;
+      width: ${size}px;
+      height: ${size}px;
+      background: ${color};
+      animation-delay: ${delay}s;
+      --rotation: ${rotation}deg;
+    `
+    container.appendChild(particle)
+  }
+
+  // Remove particles after animation completes
+  setTimeout(() => {
+    container.innerHTML = ''
+  }, 1200)
+}
+
+// ─── Set Feedback Handler (called by content.ts) ─────────────────────────────
+export function setFeedbackHandler(handler: (helpful: boolean, objectionType: string) => void): void {
+  feedbackHandler = handler
+}
+
+function sendFeedback(helpful: boolean): void {
+  if (feedbackHandler && lastObjectionType) {
+    feedbackHandler(helpful, lastObjectionType)
+  }
+  // Visual feedback
+  document.getElementById('sc-feedback-yes')?.setAttribute('data-selected', helpful ? 'true' : 'false')
+  document.getElementById('sc-feedback-no')?.setAttribute('data-selected', helpful ? 'false' : 'true')
+  // Disable both buttons after one click
+  document.querySelectorAll('.sc-feedback-btn').forEach((btn) => {
+    (btn as HTMLButtonElement).disabled = true
+  })
+  // Auto-hide after selection
+  setTimeout(() => {
+    const feedbackEl = document.getElementById('sc-feedback')
+    if (feedbackEl) feedbackEl.style.display = 'none'
+  }, 1500)
+}
+
 // ─── Call-level HUD (persistent during call) ─────────────────────────────────
 export function showCallHUD(): void {
   callActive = true
@@ -126,6 +273,8 @@ export function showCallHUD(): void {
   const area = document.getElementById('sc-objection-area')
   if (area) area.classList.remove('sc-visible')
   hideSnapshot()
+  // Show onboarding tooltip on first launch
+  checkAndShowOnboarding()
 }
 
 export function hideCallHUD(): void {
@@ -209,6 +358,7 @@ export function startStreamingCard(objectionType: ObjectionType): void {
   const area = document.getElementById('sc-objection-area')
   if (area) area.classList.add('sc-visible')
   hideSnapshot()
+  hideOnboarding() // Hide onboarding once first objection arrives
 
   const badge = document.getElementById('sc-objection-badge')
   if (badge) {
@@ -224,12 +374,26 @@ export function startStreamingCard(objectionType: ObjectionType): void {
   responseEl.textContent = ''
   responseEl.classList.add('sc-streaming')
 
+  // Hide feedback area from previous card
+  const feedbackEl = document.getElementById('sc-feedback')
+  if (feedbackEl) feedbackEl.style.display = 'none'
+  document.querySelectorAll('.sc-feedback-btn').forEach((btn) => {
+    (btn as HTMLButtonElement).disabled = false
+    btn.removeAttribute('data-selected')
+  })
+
   startProgressBar()
 
   const card = hudEl.querySelector('.sc-card') as HTMLElement
   if (card) {
     card.style.borderColor = colors.border
     card.style.boxShadow = `0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px ${colors.border}, 0 0 20px ${colors.glow}`
+  }
+
+  // Celebration on first objection ever!
+  if (!firstObjectionHandled) {
+    firstObjectionHandled = true
+    triggerCelebration()
   }
 
   clearDismissTimer()
@@ -270,6 +434,13 @@ export function finalizeHUDCard(card: ObjectionCard): void {
     conf.title = `AI confidence: ${pct}%`
   }
 
+  // Show feedback buttons
+  lastObjectionType = card.objection
+  const feedbackEl = document.getElementById('sc-feedback')
+  if (feedbackEl) {
+    feedbackEl.style.display = 'flex'
+  }
+
   stopProgressBar()
   startDismissTimer()
 }
@@ -280,6 +451,10 @@ export function dismissHUDCard(): void {
   stopProgressBar()
   isStreaming = false
   rafQueue = []
+
+  // Hide feedback
+  const feedbackEl = document.getElementById('sc-feedback')
+  if (feedbackEl) feedbackEl.style.display = 'none'
 
   const area = document.getElementById('sc-objection-area')
   if (area) area.classList.remove('sc-visible')
@@ -499,14 +674,14 @@ function getInlineCSS(): string {
       pointer-events: all;
     }
     .sc-card {
-      width: 380px;
-      max-width: min(92vw, 420px);
+      width: 280px;
+      max-width: min(85vw, 300px);
       background: rgba(13, 13, 28, 0.95);
       backdrop-filter: blur(20px) saturate(180%);
       -webkit-backdrop-filter: blur(20px) saturate(180%);
       border: 1px solid rgba(139, 92, 246, 0.2);
-      border-radius: 16px;
-      padding: 16px 18px 12px;
+      border-radius: 14px;
+      padding: 12px 14px 10px;
       box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px rgba(139,92,246,0.08);
       transform: translateY(12px) scale(0.97);
       opacity: 0;
@@ -676,13 +851,175 @@ function getInlineCSS(): string {
     }
     .sc-objection-area {
       display: none;
-      padding: 0 18px 14px;
+      padding: 0 14px 10px;
     }
     .sc-objection-area.sc-visible {
       display: block;
       border-top: 1px solid rgba(255,255,255,0.06);
-      padding-top: 12px;
+      padding-top: 10px;
       margin-top: 2px;
+    }
+
+    /* ── Onboarding Tooltip ── */
+    .sc-onboarding {
+      display: none;
+      padding: 10px 14px;
+      background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(124,58,237,0.08));
+      border-bottom: 1px solid rgba(139,92,246,0.15);
+    }
+    .sc-onboarding.sc-onboarding-visible {
+      display: block;
+      animation: sc-fade-in 300ms ease;
+    }
+    .sc-onboarding-content {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      position: relative;
+      padding-right: 20px;
+    }
+    .sc-onboarding-icon {
+      font-size: 20px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .sc-onboarding-text {
+      font-size: 11.5px;
+      line-height: 1.5;
+      color: #cbd5e1;
+    }
+    .sc-onboarding-text strong {
+      color: #e2e8f0;
+      display: block;
+      margin-bottom: 2px;
+    }
+    .sc-onboarding-text p {
+      margin: 0;
+      color: #94a3b8;
+    }
+    .sc-onboarding-text em {
+      color: #a78bfa;
+      font-style: italic;
+    }
+    .sc-onboarding-close {
+      position: absolute;
+      top: -2px;
+      right: -4px;
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      padding: 4px;
+      border-radius: 4px;
+      transition: color 150ms ease, background 150ms ease;
+    }
+    .sc-onboarding-close:hover {
+      color: #e2e8f0;
+      background: rgba(255,255,255,0.06);
+    }
+
+    /* ── Feedback Buttons ── */
+    .sc-feedback {
+      display: none;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid rgba(255,255,255,0.06);
+    }
+    .sc-feedback-label {
+      font-size: 10.5px;
+      color: #64748b;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      flex-shrink: 0;
+    }
+    .sc-feedback-buttons {
+      display: flex;
+      gap: 6px;
+      margin-left: auto;
+    }
+    .sc-feedback-btn {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+      color: #94a3b8;
+      font-size: 10.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 150ms ease;
+      font-family: inherit;
+    }
+    .sc-feedback-btn:hover {
+      border-color: rgba(255,255,255,0.15);
+      background: rgba(255,255,255,0.06);
+    }
+    .sc-feedback-yes:hover {
+      color: #34d399;
+      border-color: rgba(52,211,153,0.25);
+      background: rgba(52,211,153,0.06);
+    }
+    .sc-feedback-no:hover {
+      color: #f87171;
+      border-color: rgba(248,113,113,0.25);
+      background: rgba(248,113,113,0.06);
+    }
+    .sc-feedback-btn[data-selected="true"] {
+      background: rgba(52,211,153,0.1);
+      border-color: rgba(52,211,153,0.3);
+      color: #34d399;
+      cursor: default;
+    }
+    .sc-feedback-btn[data-selected="false"] {
+      background: rgba(248,113,113,0.1);
+      border-color: rgba(248,113,113,0.3);
+      color: #f87171;
+      cursor: default;
+    }
+    .sc-feedback-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .sc-feedback-btn svg {
+      flex-shrink: 0;
+    }
+
+    /* ── Celebration Confetti ── */
+    .sc-celebration {
+      position: relative;
+      height: 0;
+      overflow: visible;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .sc-particle {
+      position: absolute;
+      top: -10px;
+      border-radius: 2px;
+      animation: sc-confetti-burst 1s ease-out forwards;
+      opacity: 0;
+    }
+    @keyframes sc-confetti-burst {
+      0% {
+        transform: translateY(0) rotate(0deg) scale(1);
+        opacity: 1;
+      }
+      50% {
+        opacity: 1;
+      }
+      100% {
+        transform: translateY(-60px) rotate(var(--rotation, 180deg)) scale(0.3);
+        opacity: 0;
+      }
+    }
+    @keyframes sc-fade-in {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
     }
 
     /* ── Snapshot Preview ── */
@@ -867,6 +1204,14 @@ function getInlineCSS(): string {
       .sc-snapshot-text { color: #334155; }
       .sc-snapshot-draft { background: rgba(139,92,246,0.04); }
       .sc-snapshot-draft pre { color: #334155; }
+      .sc-onboarding { border-bottom-color: rgba(139,92,246,0.15); }
+      .sc-onboarding-text strong { color: #1e293b; }
+      .sc-onboarding-text, .sc-onboarding-text p { color: #475569; }
+      .sc-feedback { border-top-color: rgba(0,0,0,0.08); }
+      .sc-feedback-btn { border-color: rgba(0,0,0,0.1); background: rgba(0,0,0,0.03); color: #64748b; }
+      .sc-feedback-btn:hover { background: rgba(0,0,0,0.05); }
+      .sc-feedback-yes:hover { color: #10b981; border-color: rgba(16,185,129,0.25); background: rgba(16,185,129,0.04); }
+      .sc-feedback-no:hover { color: #ef4444; border-color: rgba(239,68,68,0.25); background: rgba(239,68,68,0.04); }
     }
   `
 }

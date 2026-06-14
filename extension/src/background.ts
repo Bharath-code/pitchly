@@ -11,6 +11,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 })
 
+// Log when service worker starts (important for debugging MV3 lifecycle)
+console.log(`[Pitchly] Background worker started at ${new Date().toISOString()}`)
+
 // ─── Session State ──────────────────────────────────────────────────────────
 let currentMode: CaptureMode | null = null
 

@@ -25,8 +25,9 @@ declare function registerProcessor(
 
 // ─── Pitchly Audio Processor ──────────────────────────────────────────────
 class PitchlyProcessor extends AudioWorkletProcessor {
-  // Accumulate ~256ms of audio at 16kHz before sending (4096 samples)
-  private readonly CHUNK_SIZE = 4096
+  // Accumulate ~512ms of audio at 16kHz before sending (8192 samples)
+  // Bigger chunks give Deepgram more context for better STT accuracy
+  private readonly CHUNK_SIZE = 8192
   private buffer: Float32Array = new Float32Array(this.CHUNK_SIZE)
   private cursor = 0
 
