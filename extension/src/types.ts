@@ -38,11 +38,15 @@ export type ExtMessage =
   | { type: 'SESSION_STOPPED' }
 
 // Messages from Extension → Worker (via WebSocket)
+export type Speaker = 'rep' | 'prospect'
+
 export type ClientMessage =
-  | { type: 'audio_chunk'; data: number[] }
+  // `data` is base64-encoded little-endian Float32 PCM (16 kHz mono)
+  | { type: 'audio_chunk'; data: string; speaker: Speaker }
   | { type: 'talk_ratio'; you: number; them: number }
   | { type: 'call_ended'; durationMs: number; repEmail: string | undefined; managerEmail: string | undefined; webhookUrl: string | undefined }
   | { type: 'session_settings'; repEmail: string | undefined; managerEmail: string | undefined; webhookUrl: string | undefined }
+  | { type: 'objection_feedback'; helpful: boolean; objectionType: string }
 
 export type SentimentState = 'strong' | 'neutral' | 'at_risk'
 

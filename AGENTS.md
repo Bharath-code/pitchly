@@ -46,6 +46,7 @@ No tests, no lint, no CI, no formatter config in this repo.
   ```
 - Production secrets: `npx wrangler secret put GOOGLE_GENERATIVE_AI_API_KEY`
 - Optional: `npx wrangler secret put RESEND_API_KEY` (for post-call emails)
+- **Required for analytics:** `npx wrangler secret put DASHBOARD_TOKEN` — gates `/api/analytics/*` (Bearer header). If unset, analytics returns 503 (fail closed). Open `/dashboard` and enter the token when prompted (stored in sessionStorage, never in the URL).
 - Model is set in `wrangler.toml` (`AI_MODEL`). Current: `gemini-3-flash-preview`. Swapping providers only requires changing that var + adding the matching secret.
 
 ## Extension → Worker Connection
@@ -111,7 +112,8 @@ Trigger: Extension sends `call_ended` → Worker:
 - **XSS (Email)**: `escapeHtml()` sanitizes all user-influenced content in Resend HTML templates
 - **Email Validation**: `isValidEmail()` regex guard before sending to Resend
 - **Webhook SSRF**: URL must start with `http(s)://`, max 2048 chars
-- **CORS**: `*` origin (tighten to `chrome-extension://` post-MVP)
+- **Analytics auth**: `/api/analytics/*` require `DASHBOARD_TOKEN` via `Authorization: Bearer` (never a query param — avoids token leak via URL/Referer). Dashboard shell is public (no data). Fails closed. NOTE: single shared secret — not per-tenant isolation. All calls share one D1 with no `account_id`; anyone with the token sees every call. Add per-account scoping before multi-customer launch.
+- **CORS**: `*` origin on the data plane (WS runs from meet.google.com/zoom origins, so it needs `*` for now). Tighten to the published `chrome-extension://<id>` at launch.
 - **Type Safety**: `exactOptionalPropertyTypes: true` enforced in both packages
 
 ## Style & Conventions

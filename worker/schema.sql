@@ -1,6 +1,9 @@
 -- D1 schema for Pitchly post-call persistence
 -- Run: wrangler d1 execute pitchly-db --local --file=./schema.sql
 -- Prod: wrangler d1 execute pitchly-db --remote --file=./schema.sql
+--
+-- Migration for an existing DB (objections.helpful added for card feedback):
+--   wrangler d1 execute pitchly-db --remote --command "ALTER TABLE objections ADD COLUMN helpful INTEGER"
 
 CREATE TABLE IF NOT EXISTS calls (
   id TEXT PRIMARY KEY,
@@ -40,6 +43,7 @@ CREATE TABLE IF NOT EXISTS objections (
   confidence REAL NOT NULL,
   response TEXT NOT NULL,
   handled_well BOOLEAN,
+  helpful INTEGER,             -- rep card feedback: 1=👍, 0=👎, NULL=no feedback
   timestamp INTEGER NOT NULL,
   FOREIGN KEY (call_id) REFERENCES calls(id) ON DELETE CASCADE
 );
