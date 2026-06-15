@@ -1,8 +1,8 @@
 // content.ts — Injected into Google Meet and Zoom tabs
 // Responsibilities: HUD init, AgentClient WebSocket, audio streaming (dual-stream)
 
-import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice, showCallHUD, hideCallHUD, updateTalkRatio, updateSentiment, updateNudge, showSnapshotPreview } from './hud'
-import type { AgentMessage, ExtMessage, PopupSettings } from './types'
+import { initHUD, startStreamingCard, appendHUDText, finalizeHUDCard, dismissHUDCard, showNotice, showCallHUD, hideCallHUD, updateTalkRatio, updateSentiment, updateNudge, showSnapshotPreview, setFeedbackHandler } from './hud'
+import type { AgentMessage, ExtMessage, PopupSettings, Speaker } from './types'
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let ws: WebSocket | null = null
@@ -11,6 +11,12 @@ let isConnected = false
 let isStarting = false           // Guards against concurrent startSession calls
 let activeStreams: MediaStream[] = [] // Tracked for cleanup on stop
 let callStartTime = 0
+
+// Diagnostics
+let sessionStartTime = 0
+let messagesSent = 0
+let messagesReceived = 0
+let audioChunksSent = 0
 
 // Talk ratio accumulators
 let micEnergySum = 0
@@ -29,6 +35,17 @@ let sessionSettings: PopupSettings = {
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 initHUD()
+
+// Wire up feedback handler — sends objection feedback via WebSocket
+setFeedbackHandler((helpful: boolean, objectionType: string) => {
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({
+      type: 'objection_feedback',
+      helpful,
+      objectionType,
+    }))
+  }
+})
 
 // Listen for messages from background service worker
 chrome.runtime.onMessage.addListener((message: ExtMessage) => {
@@ -70,8 +87,12 @@ async function startSession(tabStreamId?: string): Promise<void> {
       isConnected = true
       isStarting = false
       callStartTime = Date.now()
+      sessionStartTime = Date.now()
+      messagesReceived = 0
+      messagesSent = 0
+      audioChunksSent = 0
       showCallHUD()
-      console.log('[Pitchly] WebSocket connected')
+      console.log(`[Pitchly] WebSocket connected to ${workerHost} at ${new Date().toISOString()}`)
 
       // Send settings immediately so worker has them even if call_ended misses
       if (ws?.readyState === WebSocket.OPEN) {
@@ -89,7 +110,12 @@ async function startSession(tabStreamId?: string): Promise<void> {
     ws.addEventListener('close', (e) => {
       isConnected = false
       isStarting = false
-      console.log(`[Pitchly] WebSocket closed: ${e.code} ${e.reason}`)
+      const duration = sessionStartTime > 0 ? ` (session: ${Math.round((Date.now() - sessionStartTime) / 1000)}s)` : ''
+      const stats = ` | sent: ${messagesSent} audio: ${audioChunksSent} recv: ${messagesReceived}`
+      console.log(`[Pitchly] WebSocket closed: code=${e.code} reason=${e.reason}${duration}${stats}`)
+      if (e.code !== 1000) {
+        console.warn(`[Pitchly] Unexpected close code ${e.code} — may indicate network or worker error`)
+      }
       if (activeStreams.length > 0) {
         cleanupAudio()
         hideCallHUD()
@@ -97,8 +123,9 @@ async function startSession(tabStreamId?: string): Promise<void> {
     })
 
     ws.addEventListener('error', (e) => {
-      console.error('[Pitchly] WebSocket error:', e)
+      console.error('[Pitchly] WebSocket error — check worker status and network connectivity:', e)
       isStarting = false
+      showNotice('Connection error — check worker URL and network')
     })
 
     // Start audio streaming once WS is open
@@ -113,9 +140,13 @@ async function startSession(tabStreamId?: string): Promise<void> {
 }
 
 function stopSession(): void {
+  const sessionDuration = callStartTime > 0 ? Math.round((Date.now() - callStartTime) / 1000) : 0
+  console.log(`[Pitchly] Stopping session after ${sessionDuration}s. Sent: ${messagesSent} audio chunks: ${audioChunksSent} recv: ${messagesReceived}`)
+
   // Send call_ended before cleanup so worker can finalize
   if (ws?.readyState === WebSocket.OPEN && callStartTime > 0) {
     const durationMs = Date.now() - callStartTime
+    console.log('[Pitchly] Sending call_ended to worker')
     ws.send(JSON.stringify({
       type: 'call_ended',
       durationMs,
@@ -123,6 +154,8 @@ function stopSession(): void {
       managerEmail: sessionSettings.managerEmail,
       webhookUrl: sessionSettings.webhookUrl,
     }))
+  } else {
+    console.warn('[Pitchly] Cannot send call_ended — WebSocket not open or no call active')
   }
 
   cleanupAudio()
@@ -132,6 +165,7 @@ function stopSession(): void {
   isConnected = false
   isStarting = false
   callStartTime = 0
+  sessionStartTime = 0
   hideCallHUD()
 }
 
@@ -168,8 +202,11 @@ function handleAgentMessage(event: MessageEvent<string>): void {
     return
   }
 
+  messagesReceived++
+
   switch (msg.type) {
     case 'objection_start':
+      console.log(`[Pitchly] Objection detected: ${msg.objection}`)
       startStreamingCard(msg.objection)
       break
 
@@ -178,10 +215,12 @@ function handleAgentMessage(event: MessageEvent<string>): void {
       break
 
     case 'objection_card':
+      console.log(`[Pitchly] Card finalized: ${msg.card.objection} (${Math.round(msg.card.confidence * 100)}%)`)
       finalizeHUDCard(msg.card)
       break
 
     case 'no_objection':
+      console.log('[Pitchly] No objection detected — dismissing card')
       dismissHUDCard()
       break
 
@@ -192,15 +231,17 @@ function handleAgentMessage(event: MessageEvent<string>): void {
       break
 
     case 'snapshot_preview':
+      console.log(`[Pitchly] Snapshot received: ${msg.objections.length} objections, DB persisted: ${msg.dbPersisted}`)
       showSnapshotPreview(msg)
       break
 
     case 'error':
       console.error('[Pitchly] Agent error:', msg.message)
+      showNotice(`Error: ${msg.message}`)
       break
 
     case 'call_ended_ack':
-      // Silently ignore — worker acknowledged call end
+      console.log('[Pitchly] Worker acknowledged call end')
       break
 
     default:
@@ -219,19 +260,14 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
 
     let hasTab = !!tabStreamId
 
-    // ── STT Node: sends audio to worker for Deepgram transcription ──
+    // ── STT Node: sends prospect audio to worker for transcription + objection detection ──
+    // In mixed mode this carries tab audio (remote participants = prospect).
+    // In mic-only fallback it carries mic audio, still labeled 'prospect' so
+    // objection detection runs (degraded — rep/prospect are not separable here).
     const sttNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
 
     sttNode.port.onmessage = (e: MessageEvent<{ pcm: Float32Array }>) => {
-      if (ws?.readyState === WebSocket.OPEN) {
-        const pcm = e.data.pcm
-        ws.send(
-          JSON.stringify({
-            type: 'audio_chunk',
-            data: Array.from(pcm),
-          })
-        )
-      }
+      sendAudioChunk(e.data.pcm, 'prospect')
     }
 
     // ── RMS Nodes: local volume analysis for talk ratio (mixed mode only) ──
@@ -244,6 +280,9 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
         const rms = calculateRMS(e.data.pcm)
         micEnergySum += rms * rms * e.data.pcm.length
         micSampleCount += e.data.pcm.length
+        // Mic = the rep. Transcribe for the post-call transcript (no objection
+        // detection runs on this side — see worker processAudioChunk).
+        sendAudioChunk(e.data.pcm, 'rep')
       }
 
       tabRmsNode = new AudioWorkletNode(audioCtx, 'pitchly-processor')
@@ -313,6 +352,7 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
           them = Math.round((tabRMS / total) * 100)
         }
 
+        messagesSent++
         ws.send(JSON.stringify({ type: 'talk_ratio', you, them }))
 
         // Reset accumulators
@@ -330,6 +370,30 @@ async function startAudioStreaming(tabStreamId?: string): Promise<void> {
     cleanupAudio()
     showNotice('Audio capture failed — check microphone permissions')
   }
+}
+
+// ─── Audio Chunk Sender ──────────────────────────────────────────────────────
+function sendAudioChunk(pcm: Float32Array, speaker: Speaker): void {
+  if (ws?.readyState !== WebSocket.OPEN) {
+    if (audioChunksSent > 0 && audioChunksSent % 50 === 0) {
+      console.warn(`[Pitchly] Audio chunk dropped — WebSocket not open (state: ${ws?.readyState})`)
+    }
+    return
+  }
+  audioChunksSent++
+  messagesSent++
+  ws.send(JSON.stringify({ type: 'audio_chunk', data: encodeFloat32Base64(pcm), speaker }))
+}
+
+// Encode Float32 PCM samples to base64 (lossless, ~3.4x smaller than number[] JSON)
+function encodeFloat32Base64(pcm: Float32Array): string {
+  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength)
+  let binary = ''
+  const CHUNK = 0x8000 // avoid arg-count limits on String.fromCharCode
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
+  }
+  return btoa(binary)
 }
 
 // ─── RMS Calculation ─────────────────────────────────────────────────────────

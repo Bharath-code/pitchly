@@ -3,17 +3,20 @@
 
 import { Agent, routeAgentRequest } from 'agents'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
-import { streamText, generateObject } from 'ai'
+import { streamObject, generateObject } from 'ai'
 import { z } from 'zod'
 import { ObjectionSchema, PostCallAnalysisSchema } from './schema'
 import { OBJECTION_PROMPT, POST_CALL_SENTIMENT_PROMPT, FOLLOW_UP_PROMPT } from './prompts'
 import type { PostCallAnalysis } from './schema'
+import { getSummary, getObjectionDistribution, getObjectionsOverTime, getObjectionsOverTimeByType, getRecentCalls, getCallDetail } from './analytics'
+import { DASHBOARD_HTML } from './dashboard'
 
 // ─── Environment Types ──────────────────────────────────────────────────────
 type Env = {
   // Secrets (set via wrangler secret put)
   GOOGLE_GENERATIVE_AI_API_KEY: string
   RESEND_API_KEY?: string
+  DASHBOARD_TOKEN?: string  // gates /dashboard + /api/analytics/*
 
   // Vars (from wrangler.toml [vars])
   AI_MODEL: string  // e.g. "gemini-2.5-flash"
@@ -37,6 +40,22 @@ const CORS_HEADERS = {
 
 // ─── Confidence threshold — only push card if >= this ────────────────────────
 const CONFIDENCE_THRESHOLD = 0.75
+
+// ─── Analytics auth: shared secret via Authorization: Bearer ─────────────────
+// Bearer header only — never a query param (tokens in URLs leak via history,
+// logs, and Referer). Fails closed: unset DASHBOARD_TOKEN disables analytics.
+function checkAnalyticsAuth(request: Request, env: Env): Response | null {
+  if (!env.DASHBOARD_TOKEN) {
+    return new Response('Analytics disabled: DASHBOARD_TOKEN not configured', {
+      status: 503,
+      headers: CORS_HEADERS,
+    })
+  }
+  if (request.headers.get('Authorization') === `Bearer ${env.DASHBOARD_TOKEN}`) {
+    return null
+  }
+  return new Response('Unauthorized', { status: 401, headers: CORS_HEADERS })
+}
 
 // ─── Sentiment keyword lexicon (Tier 1: rule-based) ──────────────────────────
 const SENTIMENT_POSITIVE = ['love', 'perfect', 'great', 'excellent', 'amazing', 'happy', 'excited', 'awesome', 'fantastic', 'wonderful', 'ideal', 'yes', 'definitely', 'absolutely', 'sold', 'let\'s do it', 'let\'s go', 'sign me up']
@@ -62,6 +81,50 @@ function sanitizeString(input: string | undefined, maxLen = 500): string | undef
   const trimmed = input.trim()
   if (trimmed.length === 0) return undefined
   return trimmed.slice(0, maxLen)
+}
+
+// ─── Audio decoding helpers ──────────────────────────────────────────────────
+const SAMPLE_RATE = 16000
+
+// Decode base64 little-endian Float32 PCM → Float32Array
+function decodeFloat32Base64(b64: string): Float32Array {
+  const binary = atob(b64)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  // Copy into an aligned buffer (byteOffset 0) so Float32Array is always valid
+  return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+}
+
+// Wrap Float32 PCM samples in a 16-bit mono WAV container so Deepgram nova-3
+// can auto-detect the format (raw header-less PCM is not reliably decoded).
+function floatsToWav(floats: Float32Array, sampleRate = SAMPLE_RATE): Uint8Array {
+  const numSamples = floats.length
+  const dataSize = numSamples * 2
+  const buffer = new ArrayBuffer(44 + dataSize)
+  const view = new DataView(buffer)
+  const writeStr = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i))
+  }
+  writeStr(0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  writeStr(8, 'WAVE')
+  writeStr(12, 'fmt ')
+  view.setUint32(16, 16, true)        // fmt chunk size
+  view.setUint16(20, 1, true)         // PCM
+  view.setUint16(22, 1, true)         // mono
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, sampleRate * 2, true) // byte rate (sampleRate * blockAlign)
+  view.setUint16(32, 2, true)         // block align (mono * 16-bit)
+  view.setUint16(34, 16, true)        // bits per sample
+  writeStr(36, 'data')
+  view.setUint32(40, dataSize, true)
+  let off = 44
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, floats[i] ?? 0))
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true)
+    off += 2
+  }
+  return new Uint8Array(buffer)
 }
 
 function escapeHtml(text: string): string {
@@ -101,6 +164,7 @@ export class CallSessionAgent extends Agent<Env> {
     confidence: number
     response: string
     timestamp: number
+    helpful?: boolean   // rep feedback on the card (👍/👎), if given
   }> = []
 
   // Session metadata
@@ -109,6 +173,19 @@ export class CallSessionAgent extends Agent<Env> {
   private managerEmail: string | undefined = undefined
   private webhookUrl: string | undefined = undefined
   private callStartedAt = 0
+
+  // Diagnostics counters (logged at end of call)
+  private stats = {
+    chunksReceived: 0,
+    chunksTranscribed: 0,
+    chunksEmpty: 0,
+    chunksSkipped: 0,       // non-speech audio
+    transcribeErrors: 0,
+    endOfTurnDetections: 0,
+    classifications: 0,
+    errorsCaught: 0,
+    feedbackReceived: 0,
+  }
 
   // Called when a new WebSocket connection opens
   async onConnect(connection: {
@@ -135,6 +212,17 @@ export class CallSessionAgent extends Agent<Env> {
     this.managerEmail = undefined
     this.webhookUrl = undefined
     this.callStartedAt = 0
+    this.stats = {
+      chunksReceived: 0,
+      chunksTranscribed: 0,
+      chunksEmpty: 0,
+      chunksSkipped: 0,
+      transcribeErrors: 0,
+      endOfTurnDetections: 0,
+      classifications: 0,
+      errorsCaught: 0,
+      feedbackReceived: 0,
+    }
   }
 
   // Called for each WebSocket message from the extension
@@ -153,8 +241,9 @@ export class CallSessionAgent extends Agent<Env> {
 
     const msgType = String(parsed.type || '')
 
-    if (msgType === 'audio_chunk' && Array.isArray(parsed.data)) {
-      await this.processAudioChunk(connection, parsed.data as number[])
+    if (msgType === 'audio_chunk' && typeof parsed.data === 'string') {
+      const speaker = parsed.speaker === 'rep' ? 'rep' : 'prospect'
+      await this.processAudioChunk(connection, parsed.data, speaker)
     } else if (msgType === 'talk_ratio' && typeof parsed.you === 'number' && typeof parsed.them === 'number') {
       const you = Math.max(0, Math.min(100, parsed.you))
       const them = Math.max(0, Math.min(100, parsed.them))
@@ -176,6 +265,8 @@ export class CallSessionAgent extends Agent<Env> {
       if (wh && (wh.startsWith('https://') || wh.startsWith('http://'))) this.webhookUrl = wh
 
       await this.handleCallEnded(connection, parsed.durationMs as number)
+    } else if (msgType === 'objection_feedback' && typeof parsed.helpful === 'boolean' && typeof parsed.objectionType === 'string') {
+      this.recordFeedback(parsed.objectionType, parsed.helpful)
     } else if (msgType === 'session_settings') {
       // Early settings transmission (e.g. right after WS open)
       if (isValidEmail(parsed.repEmail as string)) this.repEmail = (parsed.repEmail as string).trim()
@@ -194,6 +285,21 @@ export class CallSessionAgent extends Agent<Env> {
     console.log(`[CallSessionAgent] Connection closed: ${connection.id}`)
     this.utteranceBuffer = []
     this.classifying = false
+  }
+
+  // ─── Objection Feedback (seed for response-quality learning) ───────────────
+  // The HUD sends 👍/👎 for the most recent card; attach it to the latest
+  // detected objection of that type. Persisted with the call at end.
+  private recordFeedback(objectionType: string, helpful: boolean): void {
+    for (let i = this.objectionsDetected.length - 1; i >= 0; i--) {
+      if (this.objectionsDetected[i]!.type === objectionType) {
+        this.objectionsDetected[i]!.helpful = helpful
+        this.stats.feedbackReceived++
+        console.log(`[CallSessionAgent] Feedback: ${objectionType} → ${helpful ? '👍' : '👎'}`)
+        return
+      }
+    }
+    console.warn(`[CallSessionAgent] Feedback for unknown objection type: ${objectionType}`)
   }
 
   // ─── Sentiment Analysis (Tier 1: keyword + EMA with decay) ─────────────────
@@ -229,7 +335,23 @@ export class CallSessionAgent extends Agent<Env> {
     connection: { id: string; send: (data: string) => void },
     durationMs: number
   ): Promise<void> {
+    // Log session diagnostics
     console.log(`[CallSessionAgent] Call ended. Duration: ${Math.round(durationMs / 1000)}s`)
+    console.log(
+      `[CallSessionAgent] [diag] Session stats: ` +
+      `chunks=${this.stats.chunksReceived} ` +
+      `transcribed=${this.stats.chunksTranscribed} ` +
+      `empty=${this.stats.chunksEmpty} ` +
+      `errors=${this.stats.transcribeErrors} ` +
+      `eot=${this.stats.endOfTurnDetections} ` +
+      `classified=${this.stats.classifications} ` +
+      `objections=${this.objectionsDetected.length} ` +
+      `feedback=${this.stats.feedbackReceived} ` +
+      `segments=${this.transcriptSegments.length}`
+    )
+    if (this.stats.transcribeErrors > this.stats.chunksTranscribed) {
+      console.warn('[CallSessionAgent] [diag] More transcription errors than successful transcriptions — check Deepgram availability')
+    }
 
     const count = this.talkRatios.length
     const avgYou = count > 0 ? Math.round(this.talkRatios.reduce((s, r) => s + r.you, 0) / count) : 50
@@ -422,8 +544,8 @@ export class CallSessionAgent extends Agent<Env> {
     // Insert objections
     if (this.objectionsDetected.length > 0) {
       const stmt = db.prepare(
-        `INSERT INTO objections (call_id, type, confidence, response, timestamp)
-         VALUES (?, ?, ?, ?, ?)`
+        `INSERT INTO objections (call_id, type, confidence, response, helpful, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?)`
       )
       for (const obj of this.objectionsDetected) {
         await stmt.bind(
@@ -431,6 +553,7 @@ export class CallSessionAgent extends Agent<Env> {
           obj.type,
           obj.confidence,
           obj.response,
+          obj.helpful === undefined ? null : (obj.helpful ? 1 : 0),
           Math.floor(obj.timestamp / 1000)
         ).run()
       }
@@ -542,49 +665,102 @@ export class CallSessionAgent extends Agent<Env> {
   // ─── Audio Processing Pipeline ─────────────────────────────────────────────
   private async processAudioChunk(
     connection: { id: string; send: (data: string) => void },
-    audioData: number[]
+    audioB64: string,
+    speaker: 'rep' | 'prospect'
   ): Promise<void> {
-    const pcm = new Uint8Array(audioData.length)
-    for (let i = 0; i < audioData.length; i++) {
-      let v = audioData[i]!
-      if (!Number.isFinite(v)) v = 0
-      v = Math.max(-1, Math.min(1, v))
-      pcm[i] = Math.round((v + 1) * 127.5)
+    this.stats.chunksReceived++
+
+    let floats: Float32Array
+    try {
+      floats = decodeFloat32Base64(audioB64)
+    } catch (err) {
+      console.warn('[CallSessionAgent] Failed to decode audio chunk:', err)
+      return
     }
 
-    // Step 1: Transcribe via Deepgram Nova-3 (Workers AI)
-    const transcript = await this.transcribe(pcm)
-    if (!transcript || transcript.trim().length === 0) return
+    // Step 1: Transcribe via Deepgram Nova-3 (Workers AI) — 16-bit WAV
+    const transcript = await this.transcribe(floatsToWav(floats))
 
-    // Step 1b: Real-time sentiment update from transcript keywords
-    this.updateSentiment(transcript)
+    // Guard: if transcription fails or returns empty, track and skip
+    if (!transcript) {
+      this.stats.transcribeErrors++
+      // Log every 10th error to avoid log spam
+      if (this.stats.transcribeErrors % 10 === 1) {
+        console.warn(`[CallSessionAgent] Transcription returned null (${this.stats.transcribeErrors} total so far)`)
+        // If we've had many consecutive failures, send a diagnostic error to the extension
+        if (this.stats.transcribeErrors > 20 && this.stats.chunksTranscribed === 0) {
+          connection.send(JSON.stringify({
+            type: 'error',
+            message: 'Audio transcription not working — check microphone permissions or try rejoining the call',
+          }))
+        }
+      }
+      return
+    }
 
-    // Step 1c: Buffer transcript segment (prospect voice only in dual-stream)
+    if (transcript.trim().length === 0) {
+      this.stats.chunksEmpty++
+      // No speech detected — skip processing but don't count as error
+      return
+    }
+
+    this.stats.chunksTranscribed++
+
+    // Step 1b: Buffer transcript segment with its true speaker
     this.transcriptSegments.push({
-      speaker: 'prospect',
+      speaker,
       text: transcript.trim(),
       timestamp: Date.now(),
       sentiment: this.getSentimentState(),
     })
 
-    // Step 2: Detect end-of-turn via Flux smart-turn-v2
-    const turnComplete = await this.isEndOfTurn(pcm)
+    // Objection detection + sentiment only track the PROSPECT side.
+    // Rep audio is transcribed for the post-call transcript but never
+    // classified (the rep's own words must not trigger objection cards).
+    if (speaker === 'rep') return
+
+    // Step 1c: Real-time sentiment update from prospect keywords
+    this.updateSentiment(transcript)
+
+    // Step 2: Detect end-of-turn via Flux smart-turn-v2 (float32 PCM)
+    const turnComplete = await this.isEndOfTurn(audioB64)
     this.utteranceBuffer.push(transcript)
 
-    if (turnComplete && this.utteranceBuffer.length > 0 && !this.classifying) {
-      const utterance = this.utteranceBuffer.join(' ').trim()
-      this.utteranceBuffer = []
+    if (turnComplete) {
+      this.stats.endOfTurnDetections++
 
-      // Step 3: Classify and stream response
-      await this.classifyAndStream(connection, utterance)
+      if (this.utteranceBuffer.length > 0 && !this.classifying) {
+        this.stats.classifications++
+        const utterance = this.utteranceBuffer.join(' ').trim()
+        this.utteranceBuffer = []
+
+        // Step 3: Classify and stream response
+        await this.classifyAndStream(connection, utterance)
+      }
+    }
+
+    // Log diagnostics every 50 chunks for observability
+    if (this.stats.chunksReceived % 50 === 0) {
+      console.log(
+        `[CallSessionAgent] [diag] chunks: ${this.stats.chunksReceived} | ` +
+        `transcribed: ${this.stats.chunksTranscribed} | ` +
+        `empty: ${this.stats.chunksEmpty} | ` +
+        `errors: ${this.stats.transcribeErrors} | ` +
+        `eot: ${this.stats.endOfTurnDetections} | ` +
+        `classified: ${this.stats.classifications}`
+      )
     }
   }
 
   // ─── STT via Deepgram Nova-3 (Workers AI) ──────────────────────────────────
-  private async transcribe(audio: Uint8Array): Promise<string | null> {
+  // Expects a containerized WAV (audio/wav) — the binding does not reliably
+  // decode raw header-less PCM.
+  private async transcribe(wav: Uint8Array): Promise<string | null> {
     try {
-      const result = await (this.env.AI as unknown as { run: (model: string, input: { audio: Uint8Array }) => Promise<{ text?: string } | null> }).run('@cf/deepgram/nova-3', {
-        audio,
+      const result = await (this.env.AI as unknown as {
+        run: (model: string, input: { audio: { body: Uint8Array; contentType: string } }) => Promise<{ text?: string } | null>
+      }).run('@cf/deepgram/nova-3', {
+        audio: { body: wav, contentType: 'audio/wav' },
       })
       return result?.text ?? null
     } catch (err) {
@@ -594,10 +770,14 @@ export class CallSessionAgent extends Agent<Env> {
   }
 
   // ─── End-of-turn detection via Flux (Workers AI) ───────────────────────────
-  private async isEndOfTurn(audio: Uint8Array): Promise<boolean> {
+  // smart-turn-v2 accepts base64 PCM with an explicit dtype (float32).
+  private async isEndOfTurn(audioB64: string): Promise<boolean> {
     try {
-      const result = await (this.env.AI as unknown as { run: (model: string, input: { audio: Uint8Array }) => Promise<{ is_complete?: boolean; probability?: number } | null> }).run('@cf/pipecat-ai/smart-turn-v2', {
-        audio,
+      const result = await (this.env.AI as unknown as {
+        run: (model: string, input: { audio: string; dtype: string }) => Promise<{ is_complete?: boolean; probability?: number } | null>
+      }).run('@cf/pipecat-ai/smart-turn-v2', {
+        audio: audioB64,
+        dtype: 'float32',
       })
       return result?.is_complete === true && (result.probability ?? 0) > 0.80
     } catch (err) {
@@ -622,39 +802,10 @@ export class CallSessionAgent extends Agent<Env> {
 
       const prompt = `Utterance: "${utterance}"`
 
-      // Phase 1: Stream text tokens to HUD immediately
-      const streamResult = streamText({
-        model,
-        system: OBJECTION_PROMPT,
-        prompt,
-        temperature: 0.1,
-        maxTokens: 300,
-      })
-
-      let fullText = ''
-      let objectionTypeDetected: string | null = null
-
-      for await (const delta of streamResult.textStream) {
-        fullText += delta
-
-        if (!objectionTypeDetected) {
-          const match = fullText.match(/"objection"\s*:\s*"([^"]+)"/)
-          if (match) {
-            objectionTypeDetected = match[1]!
-            connection.send(
-              JSON.stringify({ type: 'objection_start', objection: objectionTypeDetected })
-            )
-          }
-        }
-
-        const responseMatch = fullText.match(/"response"\s*:\s*"([^"]*$)/)
-        if (responseMatch) {
-          connection.send(JSON.stringify({ type: 'stream_delta', delta }))
-        }
-      }
-
-      // Phase 2: Parse structured result and validate confidence
-      const { object } = await generateObject({
+      // Single streaming structured call: stream partial response text to the
+      // HUD for the typing effect, then await the validated object. One LLM
+      // round-trip instead of two (streamText + generateObject).
+      const result = streamObject({
         model,
         schema: ObjectionSchema,
         system: OBJECTION_PROMPT,
@@ -662,6 +813,25 @@ export class CallSessionAgent extends Agent<Env> {
         temperature: 0.1,
         maxTokens: 300,
       })
+
+      let startSent = false
+      let sentResponseLen = 0
+
+      for await (const partial of result.partialObjectStream) {
+        if (!startSent && partial.objection) {
+          startSent = true
+          connection.send(
+            JSON.stringify({ type: 'objection_start', objection: partial.objection })
+          )
+        }
+        if (typeof partial.response === 'string' && partial.response.length > sentResponseLen) {
+          const delta = partial.response.slice(sentResponseLen)
+          sentResponseLen = partial.response.length
+          connection.send(JSON.stringify({ type: 'stream_delta', delta }))
+        }
+      }
+
+      const object = await result.object
 
       if (object.objection && (object.confidence ?? 0) >= CONFIDENCE_THRESHOLD) {
         connection.send(JSON.stringify({ type: 'objection_card', card: object }))
@@ -692,12 +862,148 @@ export class CallSessionAgent extends Agent<Env> {
 // ─── Export Default Fetch Handler ────────────────────────────────────────────
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url)
+    const path = url.pathname
+    const method = request.method
+
     // Handle CORS preflight
-    if (request.method === 'OPTIONS') {
+    if (method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS })
     }
 
-    // Route WebSocket upgrades and HTTP requests to the Agent
+    // ── Auth gate: analytics data requires the shared secret (Bearer) ────────
+    // The /dashboard shell itself holds no data, so it is public; the token is
+    // collected in-page and sent as a Bearer header on every API call.
+    if (path.startsWith('/api/analytics')) {
+      const denied = checkAnalyticsAuth(request, env)
+      if (denied) return denied
+    }
+
+    // ── Dashboard HTML (static shell, no call data) ──────────────────────────
+    if (method === 'GET' && path === '/dashboard') {
+      return new Response(DASHBOARD_HTML, {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Referrer-Policy': 'no-referrer',
+        },
+      })
+    }
+
+    // ── API: Analytics Summary ──────────────────────────────────────────────
+    if (method === 'GET' && path === '/api/analytics/summary') {
+      try {
+        const data = await getSummary(env.DB)
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.error('[Analytics] Summary error:', err)
+        return new Response(JSON.stringify({ error: 'Failed to load summary' }), {
+          status: 500,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // ── API: Objection Distribution ─────────────────────────────────────────
+    if (method === 'GET' && path === '/api/analytics/objection-distribution') {
+      try {
+        const data = await getObjectionDistribution(env.DB)
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.error('[Analytics] Objection distribution error:', err)
+        return new Response(JSON.stringify({ error: 'Failed to load objections' }), {
+          status: 500,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // ── API: Objections Over Time (all types, daily counts) ─────────────────
+    if (method === 'GET' && path === '/api/analytics/objections-over-time') {
+      try {
+        const days = parseInt(url.searchParams.get('days') || '30', 10)
+        const data = await getObjectionsOverTime(env.DB, days)
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.error('[Analytics] Objections over time error:', err)
+        return new Response(JSON.stringify({ error: 'Failed to load timeline' }), {
+          status: 500,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // ── API: Objections Over Time By Type ───────────────────────────────────
+    if (method === 'GET' && path === '/api/analytics/objections-over-time-by-type') {
+      try {
+        const days = parseInt(url.searchParams.get('days') || '30', 10)
+        const data = await getObjectionsOverTimeByType(env.DB, days)
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.error('[Analytics] Objections over time by type error:', err)
+        return new Response(JSON.stringify({ error: 'Failed to load timeline' }), {
+          status: 500,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // ── API: Recent Calls ───────────────────────────────────────────────────
+    if (method === 'GET' && path === '/api/analytics/recent-calls') {
+      try {
+        const limit = parseInt(url.searchParams.get('limit') || '20', 10)
+        const data = await getRecentCalls(env.DB, limit)
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.error('[Analytics] Recent calls error:', err)
+        return new Response(JSON.stringify({ error: 'Failed to load calls' }), {
+          status: 500,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // ── API: Call Detail ────────────────────────────────────────────────────
+    const callDetailMatch = path.match(/^\/api\/analytics\/call\/([^/]+)$/)
+    if (method === 'GET' && callDetailMatch) {
+      try {
+        const callId = decodeURIComponent(callDetailMatch[1]!)
+        const data = await getCallDetail(env.DB, callId)
+        if (!data) {
+          return new Response(JSON.stringify({ error: 'Call not found' }), {
+            status: 404,
+            headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+          })
+        }
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      } catch (err) {
+        console.error('[Analytics] Call detail error:', err)
+        return new Response(JSON.stringify({ error: 'Failed to load call' }), {
+          status: 500,
+          headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        })
+      }
+    }
+
+    // ── Route WebSocket upgrades to the Agent ──────────────────────────────
     const agentResponse = await routeAgentRequest(request, env)
     if (agentResponse) {
       const headers = new Headers(agentResponse.headers)
@@ -708,7 +1014,7 @@ export default {
       })
     }
 
-    return new Response('Pitchly — Worker running', {
+    return new Response('Pitchly — Worker running. Try /dashboard for analytics.', {
       status: 200,
       headers: { ...CORS_HEADERS, 'Content-Type': 'text/plain' },
     })
